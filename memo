@@ -1,0 +1,145 @@
+Option Explicit
+
+Sub データインポート_Click()
+    Dim filePath As String
+    filePath = Application.GetOpenFilename("CSVファイル (*.csv), *.csv", , "インポートするCSVファイルを選択")
+    If filePath = "False" Then Exit Sub
+
+    Call インポート処理(filePath)
+End Sub
+
+Sub クリア_Click()
+    Worksheets("マスターシート").Range("B8").CurrentRegion.ClearContents
+End Sub
+
+Sub CSV出力_Click()
+    Dim exportPath As String
+    exportPath = Application.GetSaveAsFilename("加工後データ.csv", "CSVファイル (*.csv), *.csv")
+    If exportPath = "False" Then Exit Sub
+    
+    Call 加工後データをCSV出力(exportPath)
+End Sub
+
+Sub インポート処理(filePath As String)
+    Dim fso As Object, ts As Object
+    Dim rawData As Variant, headers As Variant
+    Dim i As Long, j As Long
+    Dim mapWs As Worksheet, masterWs As Worksheet
+    Dim colMap As Object: Set colMap = CreateObject("Scripting.Dictionary")
+    Dim row As Long
+    Dim line As String, parts As Variant
+    Dim convertedValue As String
+    Dim headerIndex As Object: Set headerIndex = CreateObject("Scripting.Dictionary")
+    
+    Set mapWs = Worksheets("カラムマッピングシート")
+    Set masterWs = Worksheets("マスターシート")
+
+    ' カラムマッピング読み込み
+    row = 2
+    Do While mapWs.Cells(row, 1).Value <> ""
+        Dim srcCol As String, tgtCol As String, dtype As String, ruleRaw As String
+        srcCol = mapWs.Cells(row, 1).Value
+        tgtCol = mapWs.Cells(row, 2).Value
+        dtype = mapWs.Cells(row, 3).Value
+        ruleRaw = mapWs.Cells(row, 4).Value ' optional: "◯=はい;×=いいえ"
+
+        Dim ruleDict As Object: Set ruleDict = CreateObject("Scripting.Dictionary")
+        If ruleRaw <> "" Then
+            Dim rulePairs: rulePairs = Split(ruleRaw, ";")
+            Dim rp
+            For Each rp In rulePairs
+                Dim kv: kv = Split(rp, "=")
+                If UBound(kv) = 1 Then
+                    ruleDict(Trim(kv(0))) = Trim(kv(1))
+                End If
+            Next
+        End If
+        
+        colMap(srcCol) = Array(tgtCol, dtype, ruleDict)
+        row = row + 1
+    Loop
+
+    ' CSV読み込み
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    Set ts = fso.OpenTextFile(filePath, 1, False, -1)
+    
+    ' ヘッダー読み込み
+    If Not ts.AtEndOfStream Then
+        line = ts.ReadLine
+        headers = Split(line, ",")
+        For i = LBound(headers) To UBound(headers)
+            headerIndex(Trim(headers(i))) = i
+        Next
+    End If
+    
+    ' 加工後テーブルにヘッダー出力
+    Dim tgtHeaders() As String
+    ReDim tgtHeaders(0 To colMap.Count - 1)
+    i = 0
+    Dim key
+    For Each key In colMap.Keys
+        tgtHeaders(i) = colMap(key)(0)
+        i = i + 1
+    Next
+    masterWs.Range("B8").Resize(1, UBound(tgtHeaders) + 1).Value = tgtHeaders
+
+    ' データ読み込みと変換
+    Dim rowIndex As Long: rowIndex = 2
+    Do While Not ts.AtEndOfStream
+        line = ts.ReadLine
+        parts = Split(line, ",")
+        
+        i = 0
+        For Each key In colMap.Keys
+            If Not headerIndex.exists(key) Then
+                MsgBox "CSVに存在しない列があります: " & key, vbCritical
+                Exit Sub
+            End If
+            
+            Dim colIdx As Long: colIdx = headerIndex(key)
+            Dim rawVal As String: rawVal = parts(colIdx)
+            Dim mappedVal As String: mappedVal = rawVal
+            
+            ' 値変換ルール適用
+            If colMap(key)(2).exists(rawVal) Then
+                mappedVal = colMap(key)(2)(rawVal)
+                masterWs.Cells(7 + rowIndex, 2 + i).Interior.Color = RGB(173, 216, 230) ' 水色
+            ElseIf rawVal = "" Then
+                mappedVal = ""
+                masterWs.Cells(7 + rowIndex, 2 + i).Interior.Color = RGB(255, 255, 153) ' 黄色
+            End If
+            
+            masterWs.Cells(7 + rowIndex, 2 + i).Value = mappedVal
+            i = i + 1
+        Next
+        rowIndex = rowIndex + 1
+    Loop
+    
+    ts.Close
+    MsgBox "データインポート完了しました。", vbInformation
+End Sub
+
+Sub 加工後データをCSV出力(filePath As String)
+    Dim masterWs As Worksheet
+    Dim rng As Range
+    Dim i As Long, j As Long
+    Dim line As String
+    Dim fso As Object, ts As Object
+
+    Set masterWs = Worksheets("マスターシート")
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    Set ts = fso.CreateTextFile(filePath, True, True)
+    
+    Set rng = masterWs.Range("B8").CurrentRegion
+
+    For i = 1 To rng.Rows.Count
+        line = ""
+        For j = 1 To rng.Columns.Count
+            line = line & """" & rng.Cells(i, j).Value & """" & IIf(j < rng.Columns.Count, ",", "")
+        Next
+        ts.WriteLine line
+    Next
+    
+    ts.Close
+    MsgBox "CSV出力が完了しました。", vbInformation
+End Sub
