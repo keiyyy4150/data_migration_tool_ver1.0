@@ -1,145 +1,207 @@
 Option Explicit
 
-Sub データインポート_Click()
-    Dim filePath As String
-    filePath = Application.GetOpenFilename("CSVファイル (*.csv), *.csv", , "インポートするCSVファイルを選択")
-    If filePath = "False" Then Exit Sub
+Public Const IMPORT_FOLDER As String = "inportFiles"
+Public Const EXPORT_FOLDER As String = "exportFiles"
 
-    Call インポート処理(filePath)
-End Sub
+' 読み込んだデータ（キー: テーブル名, 値: 2次元配列）
+Public ImportedTables As Object
+Public IsImported As Boolean
 
-Sub クリア_Click()
-    Worksheets("マスターシート").Range("B8").CurrentRegion.ClearContents
-End Sub
-
-Sub CSV出力_Click()
-    Dim exportPath As String
-    exportPath = Application.GetSaveAsFilename("加工後データ.csv", "CSVファイル (*.csv), *.csv")
-    If exportPath = "False" Then Exit Sub
+'=======================
+' ファイルインポート
+'=======================
+Sub ImportFiles()
+    Dim wsSet As Worksheet, wsMap As Worksheet
+    Dim fPath As String, tblName As String, fileName As String
+    Dim i As Long
     
-    Call 加工後データをCSV出力(exportPath)
-End Sub
-
-Sub インポート処理(filePath As String)
-    Dim fso As Object, ts As Object
-    Dim rawData As Variant, headers As Variant
-    Dim i As Long, j As Long
-    Dim mapWs As Worksheet, masterWs As Worksheet
-    Dim colMap As Object: Set colMap = CreateObject("Scripting.Dictionary")
-    Dim row As Long
-    Dim line As String, parts As Variant
-    Dim convertedValue As String
-    Dim headerIndex As Object: Set headerIndex = CreateObject("Scripting.Dictionary")
+    Set wsSet = ThisWorkbook.Sheets("Setting")
+    Set wsMap = ThisWorkbook.Sheets("Mapping")
+    fPath = ThisWorkbook.Path & "\" & IMPORT_FOLDER & "\"
     
-    Set mapWs = Worksheets("カラムマッピングシート")
-    Set masterWs = Worksheets("マスターシート")
-
-    ' カラムマッピング読み込み
-    row = 2
-    Do While mapWs.Cells(row, 1).Value <> ""
-        Dim srcCol As String, tgtCol As String, dtype As String, ruleRaw As String
-        srcCol = mapWs.Cells(row, 1).Value
-        tgtCol = mapWs.Cells(row, 2).Value
-        dtype = mapWs.Cells(row, 3).Value
-        ruleRaw = mapWs.Cells(row, 4).Value ' optional: "◯=はい;×=いいえ"
-
-        Dim ruleDict As Object: Set ruleDict = CreateObject("Scripting.Dictionary")
-        If ruleRaw <> "" Then
-            Dim rulePairs: rulePairs = Split(ruleRaw, ";")
-            Dim rp
-            For Each rp In rulePairs
-                Dim kv: kv = Split(rp, "=")
-                If UBound(kv) = 1 Then
-                    ruleDict(Trim(kv(0))) = Trim(kv(1))
-                End If
-            Next
+    Set ImportedTables = CreateObject("Scripting.Dictionary")
+    IsImported = False
+    
+    ' Settingシートからテーブル情報を取得
+    i = 2
+    Do While wsSet.Cells(i, 1).Value <> ""
+        tblName = wsSet.Cells(i, 1).Value
+        fileName = wsSet.Cells(i, 2).Value
+        
+        ' ファイル存在チェック
+        If Dir(fPath & fileName) = "" Then
+            MsgBox "ファイルが不足しています: " & fileName, vbCritical
+            Exit Sub
         End If
         
-        colMap(srcCol) = Array(tgtCol, dtype, ruleDict)
-        row = row + 1
+        ' CSV読み込み
+        ImportedTables(tblName) = ReadCSVtoArray(fPath & fileName)
+        
+        i = i + 1
     Loop
-
-    ' CSV読み込み
-    Set fso = CreateObject("Scripting.FileSystemObject")
-    Set ts = fso.OpenTextFile(filePath, 1, False, -1)
     
-    ' ヘッダー読み込み
-    If Not ts.AtEndOfStream Then
-        line = ts.ReadLine
-        headers = Split(line, ",")
-        For i = LBound(headers) To UBound(headers)
-            headerIndex(Trim(headers(i))) = i
-        Next
+    MsgBox "インポート完了", vbInformation
+    IsImported = True
+End Sub
+
+'=======================
+' データ加工（JOIN + 型変換）
+'=======================
+Sub ProcessData()
+    If Not IsImported Then
+        MsgBox "先にファイルインポートを実行してください", vbExclamation
+        Exit Sub
     End If
     
-    ' 加工後テーブルにヘッダー出力
-    Dim tgtHeaders() As String
-    ReDim tgtHeaders(0 To colMap.Count - 1)
-    i = 0
-    Dim key
-    For Each key In colMap.Keys
-        tgtHeaders(i) = colMap(key)(0)
-        i = i + 1
-    Next
-    masterWs.Range("B8").Resize(1, UBound(tgtHeaders) + 1).Value = tgtHeaders
-
-    ' データ読み込みと変換
-    Dim rowIndex As Long: rowIndex = 2
-    Do While Not ts.AtEndOfStream
-        line = ts.ReadLine
-        parts = Split(line, ",")
-        
-        i = 0
-        For Each key In colMap.Keys
-            If Not headerIndex.exists(key) Then
-                MsgBox "CSVに存在しない列があります: " & key, vbCritical
-                Exit Sub
-            End If
-            
-            Dim colIdx As Long: colIdx = headerIndex(key)
-            Dim rawVal As String: rawVal = parts(colIdx)
-            Dim mappedVal As String: mappedVal = rawVal
-            
-            ' 値変換ルール適用
-            If colMap(key)(2).exists(rawVal) Then
-                mappedVal = colMap(key)(2)(rawVal)
-                masterWs.Cells(7 + rowIndex, 2 + i).Interior.Color = RGB(173, 216, 230) ' 水色
-            ElseIf rawVal = "" Then
-                mappedVal = ""
-                masterWs.Cells(7 + rowIndex, 2 + i).Interior.Color = RGB(255, 255, 153) ' 黄色
-            End If
-            
-            masterWs.Cells(7 + rowIndex, 2 + i).Value = mappedVal
-            i = i + 1
-        Next
-        rowIndex = rowIndex + 1
-    Loop
-    
-    ts.Close
-    MsgBox "データインポート完了しました。", vbInformation
-End Sub
-
-Sub 加工後データをCSV出力(filePath As String)
-    Dim masterWs As Worksheet
-    Dim rng As Range
+    Dim wsMap As Worksheet, wsSet As Worksheet, wsWork As Worksheet
+    Dim outArr() As Variant
+    Dim rowCnt As Long, colCnt As Long
+    Dim keyCol As String, keyIdx1 As Long, keyIdx2 As Long
     Dim i As Long, j As Long
-    Dim line As String
-    Dim fso As Object, ts As Object
-
-    Set masterWs = Worksheets("マスターシート")
-    Set fso = CreateObject("Scripting.FileSystemObject")
-    Set ts = fso.CreateTextFile(filePath, True, True)
+    Dim t1(), t2()
     
-    Set rng = masterWs.Range("B8").CurrentRegion
-
-    For i = 1 To rng.Rows.Count
-        line = ""
-        For j = 1 To rng.Columns.Count
-            line = line & """" & rng.Cells(i, j).Value & """" & IIf(j < rng.Columns.Count, ",", "")
+    Set wsMap = ThisWorkbook.Sheets("Mapping")
+    Set wsSet = ThisWorkbook.Sheets("Setting")
+    Set wsWork = ThisWorkbook.Sheets("Work")
+    
+    ' 仮：今回はtable1とtable2のJOINを前提に
+    t1 = ImportedTables("table1")
+    t2 = ImportedTables("table2")
+    
+    ' 出力配列サイズ
+    rowCnt = UBound(t1, 1) - 1 ' ヘッダーを除く
+    colCnt = Application.WorksheetFunction.CountA(wsMap.Range("A:A"))
+    ReDim outArr(1 To rowCnt, 1 To colCnt)
+    
+    ' キー列名取得（仮: SettingのC列）
+    keyCol = wsSet.Cells(2, 3).Value
+    keyIdx1 = FindColumnIndex(t1, keyCol)
+    keyIdx2 = FindColumnIndex(t2, keyCol)
+    
+    ' マッピングに沿ってデータ作成
+    For i = 2 To rowCnt + 1
+        For j = 1 To colCnt
+            Dim srcVal As String
+            Dim srcTbl As String
+            Dim srcColName As String
+            Dim colType As String
+            Dim logic As String
+            
+            colType = wsMap.Cells(j + 1, 2).Value
+            logic = wsMap.Cells(j + 1, 3).Value
+            
+            ' D列以降で該当テーブルとカラムを探す
+            Dim k As Long
+            For k = 4 To wsMap.Cells(1, wsMap.Columns.Count).End(xlToLeft).Column
+                srcTbl = wsMap.Cells(1, k).Value
+                srcColName = wsMap.Cells(j + 1, k).Value
+                If srcColName <> "" Then
+                    If srcTbl = "table1" Then
+                        srcVal = t1(i, FindColumnIndex(t1, srcColName))
+                    ElseIf srcTbl = "table2" Then
+                        ' table2のキーに一致する行を探す
+                        Dim matchRow As Long
+                        matchRow = FindRowByKey(t2, keyIdx2, t1(i, keyIdx1))
+                        If matchRow > 0 Then
+                            srcVal = t2(matchRow, FindColumnIndex(t2, srcColName))
+                        End If
+                    End If
+                End If
+            Next
+            
+            ' 型変換
+            Select Case UCase(colType)
+                Case "NUMBER"
+                    If IsNumeric(srcVal) Then srcVal = CLng(srcVal)
+                Case "DATE"
+                    If IsDate(srcVal) Then srcVal = Format(srcVal, "yyyy/mm/dd")
+                Case Else
+                    srcVal = CStr(srcVal)
+            End Select
+            
+            ' 加工ロジック（例: "◯→はい;×→いいえ"）
+            If logic <> "" Then
+                Dim rules() As String, r As Long
+                rules = Split(logic, ";")
+                For r = LBound(rules) To UBound(rules)
+                    Dim pair() As String
+                    pair = Split(rules(r), "→")
+                    If UBound(pair) = 1 Then
+                        srcVal = Replace(srcVal, pair(0), pair(1))
+                    End If
+                Next
+            End If
+            
+            outArr(i - 1, j) = srcVal
         Next
-        ts.WriteLine line
     Next
     
-    ts.Close
-    MsgBox "CSV出力が完了しました。", vbInformation
+    ' Workシートのテーブルに反映
+    Dim tbl As ListObject
+    Set tbl = wsWork.ListObjects(1)
+    tbl.DataBodyRange.ClearContents
+    tbl.Resize tbl.Range.Resize(rowCnt + 1, colCnt)
+    tbl.DataBodyRange.Value = outArr
+    
+    MsgBox "データ加工完了（JOIN + 型変換）", vbInformation
 End Sub
+
+'=======================
+' 補助関数
+'=======================
+Function ReadCSVtoArray(filePath As String) As Variant
+    Dim fs As Object, ts As Object
+    Dim text As String
+    Dim lines As Variant
+    Dim i As Long
+    
+    Set fs = CreateObject("Scripting.FileSystemObject")
+    Set ts = fs.OpenTextFile(filePath, 1, False, -1)
+    text = ts.ReadAll
+    ts.Close
+    
+    lines = Split(text, vbCrLf)
+    
+    Dim result() As Variant
+    Dim maxCols As Long
+    maxCols = 0
+    For i = LBound(lines) To UBound(lines)
+        Dim tmp() As String
+        tmp = Split(lines(i), ",")
+        If UBound(tmp) > maxCols Then maxCols = UBound(tmp)
+    Next
+    
+    ReDim result(1 To UBound(lines) + 1, 1 To maxCols + 1)
+    For i = LBound(lines) To UBound(lines)
+        Dim arr() As String
+        arr = Split(lines(i), ",")
+        Dim j As Long
+        For j = LBound(arr) To UBound(arr)
+            result(i + 1, j + 1) = arr(j)
+        Next
+    Next
+    
+    ReadCSVtoArray = result
+End Function
+
+Function FindColumnIndex(arr As Variant, colName As String) As Long
+    Dim c As Long
+    For c = 1 To UBound(arr, 2)
+        If arr(1, c) = colName Then
+            FindColumnIndex = c
+            Exit Function
+        End If
+    Next
+    FindColumnIndex = 0
+End Function
+
+Function FindRowByKey(arr As Variant, keyIdx As Long, keyVal As String) As Long
+    Dim r As Long
+    For r = 2 To UBound(arr, 1)
+        If arr(r, keyIdx) = keyVal Then
+            FindRowByKey = r
+            Exit Function
+        End If
+    Next
+    FindRowByKey = 0
+End Function
