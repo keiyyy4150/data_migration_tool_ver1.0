@@ -15,6 +15,17 @@ Private KeyIndex As Object   ' Scripting.Dictionary
 Private RawJoined As Variant
 Private HasRaw As Boolean
 
+' 現在のMasterが加工後かどうか（CSVの自動ファイル名に使用）
+Public IsProcessed As Boolean
+
+' ---- Mappingキャッシュ（直近読込を保持）----
+Private m_outCols()  As String  ' A列：出力カラム名
+Private m_dataType() As String  ' B列：データ型（TEXT/NUMBER/DATE）
+Private m_logic()    As String  ' C列：置換ロジック（"a→b;c→d"）
+Private m_isKey()    As Boolean ' D列：キー列フラグ（○）
+Private m_tblNames() As String  ' 1行目E列以降：テーブル名（CSVファイル名の拡張子抜き）
+Private m_srcCols    As Variant ' 行=出力列、列=テーブル：元カラム名
+
 
 '==============================
 ' 1) ファイルインポート：読み込み→結合→Masterへ無加工貼り付け
@@ -22,8 +33,6 @@ Private HasRaw As Boolean
 Public Sub ImportFiles()
     Dim wsMap As Worksheet, wsMaster As Worksheet
     Dim basePath As String, importPath As String
-    Dim outCols() As String, dataType() As String, logic() As String, isKey() As Boolean
-    Dim tblNames() As String, srcCols As Variant
     Dim ok As Boolean
     
     Set wsMap = ThisWorkbook.Sheets("Mapping")
@@ -32,33 +41,34 @@ Public Sub ImportFiles()
     basePath = ThisWorkbook.Path
     importPath = basePath & "\" & IMPORT_FOLDER & "\"
     
-    ' --- 1) Mappingを読み込み（出力列・型・ロジック・キー・テーブル名・各テーブルの元カラム） ---
-    ok = ReadMapping(wsMap, outCols, dataType, logic, isKey, tblNames, srcCols)
+    ' --- 1) Mapping読込（記載ルールは下の ReadMapping 参照） ---
+    ok = ReadMapping(wsMap)
     If Not ok Then
         MsgBox "Mappingシートの読み取りでエラー。定義を確認してください。", vbCritical
         Exit Sub
     End If
     
-    ' --- 2) 必要CSVの存在チェック＆読み込み ---
+    ' --- 2) 必要CSVの存在チェック＆全読込 ---
     Set TableData = CreateObject("Scripting.Dictionary")
-    If Not LoadAllCsv(importPath, tblNames, TableData) Then
+    If Not LoadAllCsv(importPath, m_tblNames, TableData) Then
         Exit Sub  ' エラー表示済み
     End If
     
-    ' --- 3) 各テーブルのキー定義を解析し、ハッシュ（Key -> 行Index）を構築 ---
+    ' --- 3) 各テーブルのキー辞書（複合キー対応）を構築 ---
     Set KeyIndex = CreateObject("Scripting.Dictionary")
-    BuildAllKeyIndexes tblNames, srcCols, isKey, TableData, KeyIndex
+    BuildAllKeyIndexes m_tblNames, m_srcCols, m_isKey, TableData, KeyIndex
     
-    ' --- 4) ベーステーブルを決定（左端のテーブルで、キー列が1つでも定義されているものを優先。なければ左端） ---
+    ' --- 4) ベーステーブル選定（キーが成立する最初のテーブル。なければ左端） ---
     Dim baseTbl As String
-    baseTbl = PickBaseTableName(tblNames, srcCols, isKey)
-    If Len(baseTbl) = 0 Then baseTbl = tblNames(0) ' 念のため
+    baseTbl = PickBaseTableName(m_tblNames, m_srcCols, m_isKey)
+    If Len(baseTbl) = 0 Then baseTbl = m_tblNames(0)
     
-    ' --- 5) 無加工JOIN結果を作る（Masterの列順＝Mapping A列順に合わせて配列構築） ---
-    RawJoined = BuildJoinedRaw(baseTbl, outCols, tblNames, srcCols, TableData, KeyIndex)
+    ' --- 5) 無加工JOIN結果を構築（Master列順＝Mapping A列順） ---
+    RawJoined = BuildJoinedRaw(baseTbl)
     HasRaw = True
+    IsProcessed = False   ' 無加工の状態
     
-    ' --- 6) Masterテーブルに「値だけ」貼り付け（列は既存の見出しのまま） ---
+    ' --- 6) Masterに貼り付け（既存テーブルの列構成に合わせ、行数だけ調整して値を入れる） ---
     PasteToMaster wsMaster, RawJoined
     
     MsgBox "ファイルインポート完了：CSV読込→結合（無加工）→Master貼付け", vbInformation
@@ -75,27 +85,26 @@ Public Sub ProcessData()
     End If
     
     Dim wsMap As Worksheet, wsMaster As Worksheet
-    Dim outCols() As String, dataType() As String, logic() As String, isKey() As Boolean
-    Dim tblNames() As String, srcCols As Variant
     Dim ok As Boolean
     
     Set wsMap = ThisWorkbook.Sheets("Mapping")
     Set wsMaster = ThisWorkbook.Sheets("Master")
     
-    ' Mapping再読込（型・置換ルールを使う）
-    ok = ReadMapping(wsMap, outCols, dataType, logic, isKey, tblNames, srcCols)
+    ' 最新のMapping（型・置換）を再読込（m_* を更新）
+    ok = ReadMapping(wsMap)
     If Not ok Then
         MsgBox "Mappingシートの読み取りでエラー。定義を確認してください。", vbCritical
         Exit Sub
     End If
     
-    ' RawJoinedに対して型変換＆置換を適用
+    ' 無加工JOIN結果 RawJoined に対して加工適用
     Dim procArr As Variant
-    procArr = ApplyTransform(RawJoined, dataType, logic)
+    procArr = ApplyTransform(RawJoined, m_dataType, m_logic)
     
     ' Masterへ上書き
     PasteToMaster wsMaster, procArr
     
+    IsProcessed = True    ' 加工後
     MsgBox "データ加工完了：型変換・置換ロジックを適用しました。", vbInformation
 End Sub
 
@@ -112,6 +121,7 @@ Public Sub ClearData()
     On Error GoTo 0
     
     HasRaw = False
+    IsProcessed = False
     Erase RawJoined
     Set TableData = Nothing
     Set KeyIndex = Nothing
@@ -122,11 +132,12 @@ End Sub
 
 '==============================
 ' 4) CSV出力：Masterテーブルの現在内容を exportFiles へ
+'    （無加工/加工後 で自動ファイル名を切替）
 '==============================
 Public Sub ExportCSV()
     Dim wsMaster As Worksheet, lo As ListObject
     Dim exportPath As String, basePath As String
-    Dim fileName As String
+    Dim autoName As String
     
     Set wsMaster = ThisWorkbook.Sheets("Master")
     Set lo = wsMaster.ListObjects(1)
@@ -136,18 +147,19 @@ Public Sub ExportCSV()
         Exit Sub
     End If
     
-    fileName = Application.InputBox("保存するCSVファイル名（拡張子不要）", Type:=2)
-    If fileName = "False" Or Len(fileName) = 0 Then Exit Sub
-    
     basePath = ThisWorkbook.Path
     exportPath = basePath & "\" & EXPORT_FOLDER & "\"
+    If Dir(exportPath, vbDirectory) = "" Then MkDir exportPath
     
-    If Dir(exportPath, vbDirectory) = "" Then
-        MkDir exportPath
+    ' 自動ファイル名：加工状態 + タイムスタンプ
+    If IsProcessed Then
+        autoName = "export_processed_" & TimeStamp() & ".csv"
+    Else
+        autoName = "export_raw_" & TimeStamp() & ".csv"
     End If
     
-    WriteRangeAsCsv lo, exportPath & fileName & ".csv"
-    MsgBox "CSV出力しました：" & exportPath & fileName & ".csv", vbInformation
+    WriteRangeAsCsv lo, exportPath & autoName
+    MsgBox "CSV出力しました：" & exportPath & autoName, vbInformation
 End Sub
 
 
@@ -156,22 +168,14 @@ End Sub
 '==================================================
 
 '--- Mapping を読み込む ---
-' outCols: 出力列名配列（A列）
-' dataType: データ型配列（B列）
-' logic: 置換ロジック配列（C列）
-' isKey: キーフラグ配列（D列が ○ のとき True）
-' tblNames: 1行目E列以降のテーブル名（CSVファイル名の拡張子抜き）
-' srcCols: 2次元 Variant（行=出力列, 列=各テーブル）…元カラム名
-Private Function ReadMapping(ws As Worksheet, _
-    ByRef outCols() As String, _
-    ByRef dataType() As String, _
-    ByRef logic() As String, _
-    ByRef isKey() As Boolean, _
-    ByRef tblNames() As String, _
-    ByRef srcCols As Variant) As Boolean
-    
+' 記載ルール：
+'  A列：出力カラム名（Masterテーブル見出しと一致）
+'  B列：データ型（TEXT/NUMBER/DATE）
+'  C列：置換ロジック（"a→b;c→d"）
+'  D列：キー列フラグ（○で複合キー可）
+'  E列以降：1行目=テーブル名（CSVファイル名の拡張子抜き）、2行目以降=そのテーブルでの元カラム名
+Private Function ReadMapping(ws As Worksheet) As Boolean
     On Error GoTo FAIL
-    
     Dim lastRow As Long, lastCol As Long
     Dim i As Long, j As Long, tCount As Long
     
@@ -179,31 +183,31 @@ Private Function ReadMapping(ws As Worksheet, _
     lastCol = ws.Cells(1, ws.Columns.Count).End(xlToLeft).Column
     If lastRow < 2 Or lastCol < 5 Then GoTo FAIL  ' 最低限の形
     
-    ' 出力列（A〜D）
-    ReDim outCols(1 To lastRow - 1)
-    ReDim dataType(1 To lastRow - 1)
-    ReDim logic(1 To lastRow - 1)
-    ReDim isKey(1 To lastRow - 1)
+    ' A〜D
+    ReDim m_outCols(1 To lastRow - 1)
+    ReDim m_dataType(1 To lastRow - 1)
+    ReDim m_logic(1 To lastRow - 1)
+    ReDim m_isKey(1 To lastRow - 1)
     
     For i = 2 To lastRow
-        outCols(i - 1) = CStr(ws.Cells(i, 1).Value)
-        dataType(i - 1) = UCase$(Trim$(CStr(ws.Cells(i, 2).Value)))
-        logic(i - 1) = CStr(ws.Cells(i, 3).Value)
-        isKey(i - 1) = (CStr(ws.Cells(i, 4).Value) = "○")
+        m_outCols(i - 1)  = CStr(ws.Cells(i, 1).Value)
+        m_dataType(i - 1) = UCase$(Trim$(CStr(ws.Cells(i, 2).Value)))
+        m_logic(i - 1)    = CStr(ws.Cells(i, 3).Value)
+        m_isKey(i - 1)    = (CStr(ws.Cells(i, 4).Value) = "○")
     Next i
     
     ' テーブル名（1行目のE列以降）
     tCount = lastCol - 4
-    ReDim tblNames(0 To tCount - 1)
+    ReDim m_tblNames(0 To tCount - 1)
     For j = 5 To lastCol
-        tblNames(j - 5) = CStr(ws.Cells(1, j).Value)
+        m_tblNames(j - 5) = CStr(ws.Cells(1, j).Value)
     Next j
     
     ' 元カラムマトリクス（行=出力列, 列=テーブル）
-    ReDim srcCols(1 To lastRow - 1, 0 To tCount - 1)
+    ReDim m_srcCols(1 To lastRow - 1, 0 To tCount - 1)
     For i = 2 To lastRow
         For j = 0 To tCount - 1
-            srcCols(i - 1, j) = CStr(ws.Cells(i, 5 + j).Value)
+            m_srcCols(i - 1, j) = CStr(ws.Cells(i, 5 + j).Value)
         Next j
     Next i
     
@@ -218,7 +222,7 @@ End Function
 Private Function LoadAllCsv(importPath As String, _
                             tblNames() As String, _
                             ByRef dict As Object) As Boolean
-    Dim i As Long, filePath As String, miss As String, extra As String
+    Dim i As Long, filePath As String, extra As String
     
     ' 必要なファイル存在チェック
     For i = LBound(tblNames) To UBound(tblNames)
@@ -230,7 +234,7 @@ Private Function LoadAllCsv(importPath As String, _
         End If
     Next i
     
-    ' フォルダ内に余計なCSVがあるか検出（任意：警告のみ）
+    ' 定義外CSVの警告（処理は続行）
     Dim fn As String, isListed As Boolean
     fn = Dir(importPath & "*.csv")
     Do While Len(fn) > 0
@@ -249,10 +253,10 @@ Private Function LoadAllCsv(importPath As String, _
         MsgBox "定義外のCSVがフォルダにあります（処理は続行します）：" & vbCrLf & extra, vbExclamation
     End If
     
-    ' 読み込み
+    ' 読み込み（引用符・改行対応のCSVパーサ使用）
     For i = LBound(tblNames) To UBound(tblNames)
         filePath = importPath & tblNames(i) & ".csv"
-        dict(tblNames(i)) = ParseCsvFile(filePath) ' 引用符対応パーサ
+        dict(tblNames(i)) = ParseCsvFile(filePath)
     Next i
     
     LoadAllCsv = True
@@ -260,7 +264,7 @@ End Function
 
 
 '--- 各テーブルのキーIndex(複合キー対応)を作る ---
-' キー定義は：Mappingで「○」が付いた出力行について、
+' キー定義：Mappingで「○」が付いた出力行について、
 ' その行に各テーブルで元カラム名がある場合、それをそのテーブルのキー要素とみなす。
 Private Sub BuildAllKeyIndexes(tblNames() As String, _
                                srcCols As Variant, _
@@ -287,28 +291,24 @@ Private Sub BuildAllKeyIndexes(tblNames() As String, _
             End If
         Next i
         
-        ' キー要素が1つも取れないテーブルはスキップ（JOIN対象外）
-        If kc = 0 Then
-            keyDict(tblNames(t)) = keymap
-        Else
-            ' 2行目以降（データ部）についてキー文字列を作って辞書化
+        ' キー要素が1つも取れないテーブルは空辞書のまま
+        If kc > 0 Then
             Dim r As Long, keyStr As String
-            For r = 2 To UBound(arr, 1)
+            For r = 2 To UBound(arr, 1) ' データ行
                 keyStr = BuildKeyFromRow(arr, r, keyColIdx)
                 If Len(keyStr) > 0 Then
                     If Not keymap.Exists(keyStr) Then keymap.Add keyStr, r
                 End If
             Next r
-            keyDict(tblNames(t)) = keymap
         End If
+        keyDict(tblNames(t)) = keymap
     Next t
 End Sub
 
 
-'--- ベーステーブルを選定（最初にキーが成立するテーブルが望ましい） ---
+'--- ベーステーブルを選定（最初にキーが成立するテーブル。なければ左端） ---
 Private Function PickBaseTableName(tblNames() As String, srcCols As Variant, isKey() As Boolean) As String
     Dim t As Long, i As Long
-    
     For t = LBound(tblNames) To UBound(tblNames)
         For i = LBound(isKey) To UBound(isKey)
             If isKey(i) And Len(srcCols(i, t)) > 0 Then
@@ -317,26 +317,18 @@ Private Function PickBaseTableName(tblNames() As String, srcCols As Variant, isK
             End If
         Next i
     Next t
-    
-    ' キーがどこにも定義されていない場合は左端
     If UBound(tblNames) >= LBound(tblNames) Then PickBaseTableName = tblNames(LBound(tblNames))
 End Function
 
 
 '--- 無加工JOIN結果を構築（Master列順＝Mapping A列順） ---
-Private Function BuildJoinedRaw(baseTbl As String, _
-                                outCols() As String, _
-                                tblNames() As String, _
-                                srcCols As Variant, _
-                                tableDict As Object, _
-                                keyDict As Object) As Variant
+Private Function BuildJoinedRaw(baseTbl As String) As Variant
     Dim baseArr As Variant
-    baseArr = tableDict(baseTbl)
+    baseArr = TableData(baseTbl)
     
-    ' 出力行数：ベーステーブルのデータ行数
     Dim outRows As Long, outColsCnt As Long
-    outRows = Application.Max(0, UBound(baseArr, 1) - 1)
-    outColsCnt = UBound(outCols)
+    outRows = Application.Max(0, UBound(baseArr, 1) - 1) ' ヘッダ除く
+    outColsCnt = UBound(m_outCols)
     
     If outRows = 0 Then
         Dim emptyArr(1 To 1, 1 To outColsCnt) As Variant
@@ -347,59 +339,36 @@ Private Function BuildJoinedRaw(baseTbl As String, _
     Dim result() As Variant
     ReDim result(1 To outRows, 1 To outColsCnt)
     
-    ' ベーステーブル側のキー列を把握（列番号配列）
-    Dim baseKeyIdx() As Long, i As Long, kc As Long
-    kc = 0
-    For i = LBound(outCols) To UBound(outCols)
-        If Len(srcCols(i, IndexOfTable(tblNames, baseTbl))) > 0 Then
-            ' その行がキー対象か？
-            If HasKeyFlagAtIndex(i) Then ' ダミー、後で置換（下で再評価）
-            End If
-        End If
-    Next i
-    ' 上のダミーを正しく作るため、Mappingのキー配列を渡す必要があるので別ロジックへ
-
-    ' ベーステーブルのキー列番号を再生成
-    Dim isKeyArr() As Boolean
-    ReDim isKeyArr(LBound(outCols) To UBound(outCols))
-    ' isKeyArr は ReadMapping 内でしか持っていないため、再度取得は面倒 → 代案：
-    ' → baseKeyIdx は keyDict(baseTbl) を使わず、同一キーで他表検索する際に毎回算出でもOK
-    ' ここでは KeyDict を信頼して、ベースは「行の値からキー文字列」を毎回作る方式にする
-    
-    ' ベーステーブルの「キー要素の列番号配列」を作る
+    ' ベーステーブルの「キー要素の列番号配列」
     Dim baseKeyCols() As Long
-    baseKeyCols = CollectKeyColIndexesForTable(srcCols, baseTbl, tblNames, outCols) ' 下で定義
+    baseKeyCols = CollectKeyColIndexesForBase(baseArr, baseTbl)
     
     Dim r As Long, c As Long
-    
     For r = 2 To UBound(baseArr, 1) ' データ行
-        ' このベース行のキー文字列
         Dim myKey As String
         myKey = BuildKeyFromRow(baseArr, r, baseKeyCols)
         
         For c = 1 To outColsCnt
-            Dim v As Variant
-            v = ""
-            
-            ' この出力列は、どのテーブルのどの元カラムから取るかを決める
+            Dim v As Variant: v = ""
             Dim t As Long, srcColName As String, srcColIndex As Long, found As Boolean
-            For t = LBound(tblNames) To UBound(tblNames)
-                srcColName = srcCols(c, t) ' c行（出力列）× t列（テーブル）の元カラム名
+            
+            For t = LBound(m_tblNames) To UBound(m_tblNames)
+                srcColName = m_srcCols(c, t) ' 出力列c × テーブルt の元カラム名
                 If Len(srcColName) > 0 Then
-                    If tblNames(t) = baseTbl Then
+                    If m_tblNames(t) = baseTbl Then
                         ' ベーステーブルから直接取る
                         srcColIndex = FindColumnIndex(baseArr, srcColName)
                         If srcColIndex > 0 Then v = baseArr(r, srcColIndex)
                         found = True
                         Exit For
                     Else
-                        ' 他テーブル → キーで行を特定
+                        ' 他テーブル → キーで行を特定して取得
                         Dim kd As Object, matchRow As Long, otherArr As Variant
-                        Set kd = keyDict(tblNames(t)) ' そのテーブルのキー辞書
+                        Set kd = KeyIndex(m_tblNames(t))
                         If Not kd Is Nothing Then
                             If kd.Exists(myKey) Then
                                 matchRow = kd(myKey)
-                                otherArr = tableDict(tblNames(t))
+                                otherArr = TableData(m_tblNames(t))
                                 srcColIndex = FindColumnIndex(otherArr, srcColName)
                                 If srcColIndex > 0 Then v = otherArr(matchRow, srcColIndex)
                                 found = True
@@ -418,43 +387,39 @@ Private Function BuildJoinedRaw(baseTbl As String, _
 End Function
 
 
-'--- Mapping上で「そのテーブルにおけるキー列の列番号配列」を作る ---
-Private Function CollectKeyColIndexesForTable(srcCols As Variant, _
-                                              targetTbl As String, _
-                                              tblNames() As String, _
-                                              outCols() As String) As Variant
+'--- ベーステーブルにおけるキー列の「実列番号配列」を作る ---
+Private Function CollectKeyColIndexesForBase(baseArr As Variant, baseTbl As String) As Variant
     Dim tIdx As Long, i As Long, kc As Long
-    tIdx = IndexOfTable(tblNames, targetTbl)
+    tIdx = IndexOfTable(m_tblNames, baseTbl)
+    
+    ' まずキー対象の元カラム名を数える
     kc = 0
-    For i = LBound(outCols) To UBound(outCols)
-        ' 「この出力行がキー対象」かつ「このテーブルに元カラム名が書かれている」 → キー要素
-        If IsKeyRow(i) And Len(srcCols(i, tIdx)) > 0 Then
+    For i = LBound(m_outCols) To UBound(m_outCols)
+        If m_isKey(i) And Len(m_srcCols(i, tIdx)) > 0 Then
             kc = kc + 1
         End If
     Next i
     If kc = 0 Then
-        CollectKeyColIndexesForTable = Array()
+        CollectKeyColIndexesForBase = Array()
         Exit Function
     End If
     
+    ' 実列番号に変換
     Dim idx() As Long, cur As Long
     ReDim idx(1 To kc)
     cur = 0
-    For i = LBound(outCols) To UBound(outCols)
-        If IsKeyRow(i) And Len(srcCols(i, tIdx)) > 0 Then
+    For i = LBound(m_outCols) To UBound(m_outCols)
+        If m_isKey(i) And Len(m_srcCols(i, tIdx)) > 0 Then
             cur = cur + 1
-            idx(cur) = -1 ' 中継、あとで実テーブル配列から実列番号に変換するのでここでは -1
+            idx(cur) = FindColumnIndex(baseArr, m_srcCols(i, tIdx))
         End If
     Next i
     
-    ' 実配列の列番号化は、BuildKeyFromRow呼出し直前で行うより、ここで済ませたい。
-    ' ただしここには実データ配列が無いので、上位で FindColumnIndex できないため、
-    ' → BuildKeyFromRow 側で「-1ならスキップ」実装にしておく（上では baseArr を使うため）
-    CollectKeyColIndexesForTable = idx
+    CollectKeyColIndexesForBase = idx
 End Function
 
 
-'--- 1行から複合キー文字列を作る（列番号配列は -1 を許容。-1は無視） ---
+'--- 1行から複合キー文字列を作る（列番号配列を連結。空は無視） ---
 Private Function BuildKeyFromRow(arr As Variant, rowIdx As Long, keyColIdx() As Long) As String
     Dim i As Long, s As String
     s = ""
@@ -512,7 +477,7 @@ Private Function ApplyTransform(src As Variant, _
             Dim v As Variant
             v = src(r, c)
             
-            ' --- 型変換（Excelの自動日付化を避けたい場合は文字列で整形） ---
+            ' --- 型変換（Excelの勝手な日付型化を避けるため DATEは文字列整形） ---
             Select Case dataType(c)
                 Case "NUMBER"
                     If IsNumeric(v) And Len(v) > 0 Then
@@ -522,7 +487,7 @@ Private Function ApplyTransform(src As Variant, _
                     End If
                 Case "DATE"
                     If IsDate(v) And Len(v) > 0 Then
-                        v = Format$(CDate(v), "yyyy/mm/dd") ' ←文字列として渡す
+                        v = Format$(CDate(v), "yyyy/mm/dd") ' ←文字列として書き出し
                     Else
                         v = ""
                     End If
@@ -551,37 +516,28 @@ End Function
 
 
 '==============================
-' Masterへ貼り付け（既存テーブルの列構成に合わせて値のみ）
+' Masterへ貼り付け（既存テーブル列構成を維持しつつ行数調整）
 '==============================
 Private Sub PasteToMaster(ws As Worksheet, dataArr As Variant)
     Dim lo As ListObject, rows As Long, cols As Long
     Set lo = ws.ListObjects(1)
     
-    ' 既存データ消去
-    On Error Resume Next
-    lo.DataBodyRange.ClearContents
-    On Error GoTo 0
-    
     rows = UBound(dataArr, 1)
     cols = UBound(dataArr, 2)
     
-    ' テーブルの列数チェック（MappingとMasterの列が一致している前提）
+    ' 列数チェック（Mapping A列の数とMasterテーブル列数が一致している前提）
     If lo.ListColumns.Count <> cols Then
         MsgBox "Masterテーブルの列数がMappingの出力列数と一致しません。", vbCritical
         Exit Sub
     End If
     
-    ' 貼付け先範囲を確保（テーブルは列固定なので、行だけ広げる）
-    Dim dest As Range
-    Set dest = lo.DataBodyRange
-    If dest Is Nothing Then
-        ' テーブルが空だと DataBodyRange は Nothing になるので、ヘッダ下から行範囲を決める
-        Set dest = lo.HeaderRowRange.Offset(1).Resize(rows, cols)
-    Else
-        Set dest = dest.Resize(rows, cols)
-    End If
+    ' テーブル全体の範囲を「ヘッダ + rows行」にリサイズ（列は固定）
+    Dim newRange As Range
+    Set newRange = lo.HeaderRowRange.Resize(rows + 1, lo.ListColumns.Count)
+    lo.Resize newRange
     
-    dest.Value = dataArr
+    ' 値を書き込み
+    lo.DataBodyRange.Value = dataArr
 End Sub
 
 
@@ -603,7 +559,7 @@ Private Sub WriteRangeAsCsv(lo As ListObject, filePath As String)
         For c = 1 To cols
             Dim cell As String
             cell = CStr(arr(r, c))
-            ' ダブルクォート・改行・カンマを含む場合は引用符で囲み、内部の"は""にする
+            ' ダブルクォートは "" にエスケープ。カンマ/改行を含む場合は全体を引用符で囲む
             If InStr(cell, """") > 0 Then cell = Replace(cell, """", """""")
             If InStr(cell, ",") > 0 Or InStr(cell, vbCr) > 0 Or InStr(cell, vbLf) > 0 Then
                 cell = """" & cell & """"
@@ -617,24 +573,22 @@ End Sub
 
 
 '==============================
-' CSVパーサ（引用符内のカンマ・改行対応）
+' CSVパーサ（引用符内のカンマ・改行対応 / RFC4180簡易）
 '==============================
 Private Function ParseCsvFile(filePath As String) As Variant
     Dim fs As Object, ts As Object, s As String
     Set fs = CreateObject("Scripting.FileSystemObject")
-    Set ts = fs.OpenTextFile(filePath, 1, False) ' 文字コードは環境に応じて調整（UTF-8なら別途）
+    Set ts = fs.OpenTextFile(filePath, 1, False) ' 文字コードは環境に応じて調整（UTF-8の場合は別実装が必要）
     s = ts.ReadAll
     ts.Close
     
     ParseCsvFile = ParseCsvText(s)
 End Function
 
-' CSVテキストを2次元配列へ（RFC4180準拠の簡易実装）
 Private Function ParseCsvText(ByVal txt As String) As Variant
     Dim i As Long, ch As String * 1
     Dim inQuote As Boolean
     Dim field As String, row As Collection, rows As Collection
-    Dim c As Long
     
     Set rows = New Collection
     Set row = New Collection
@@ -644,70 +598,3 @@ Private Function ParseCsvText(ByVal txt As String) As Variant
     For i = 1 To Len(txt)
         ch = Mid$(txt, i, 1)
         If inQuote Then
-            If ch = """" Then
-                ' 連続する "" はエスケープ → " を1つ追加
-                If i < Len(txt) And Mid$(txt, i + 1, 1) = """" Then
-                    field = field & """": i = i + 1
-                Else
-                    inQuote = False
-                End If
-            Else
-                field = field & ch
-            End If
-        Else
-            Select Case ch
-                Case """" ' フィールド開始の引用符
-                    inQuote = True
-                Case ","   ' フィールド区切り
-                    row.Add field: field = ""
-                Case vbCr
-                    ' Windows改行のCRは無視（次のLFで行確定）
-                Case vbLf
-                    row.Add field: field = ""
-                    rows.Add row
-                    Set row = New Collection
-                Case Else
-                    field = field & ch
-            End Select
-        End If
-    Next i
-    ' 最終フィールド・最終行を追加
-    row.Add field
-    rows.Add row
-    
-    ' 可変列に対応するため、最大列数を算出
-    Dim maxCol As Long, r As Long
-    maxCol = 0
-    For r = 1 To rows.Count
-        If rows(r).Count > maxCol Then maxCol = rows(r).Count
-    Next r
-    
-    ' 2次元配列へ展開（1-based）
-    Dim result() As Variant
-    ReDim result(1 To rows.Count, 1 To maxCol)
-    Dim rr As Long, cc As Long
-    For rr = 1 To rows.Count
-        For cc = 1 To rows(rr).Count
-            result(rr, cc) = rows(rr)(cc)
-        Next cc
-        ' 足りない分は空文字
-        For cc = rows(rr).Count + 1 To maxCol
-            result(rr, cc) = ""
-        Next cc
-    Next rr
-    
-    ParseCsvText = result
-End Function
-
-
-'==============================
-' Mappingのキー判定を取るためのヘルパ（簡易：直近ReadMappingの配列を使う設計にしていないためダミー）
-' → 実装簡略化のため IsKeyRow は「○判定」を使う代わりに
-'   BuildJoinedRaw 側では CollectKeyColIndexesForTable でキーを収集する方針に寄せました。
-'==============================
-Private Function IsKeyRow(idx As Long) As Boolean
-    ' 実運用では、ReadMappingで得た isKey() をモジュール変数に保持し、ここで参照すると綺麗です。
-    ' サンプルでは簡略化（true固定にせず、空実装にしてあります）。
-    ' ここを使わない構成にしているため、ダミーのままでも動作に影響しません。
-    IsKeyRow = False
-End Function
