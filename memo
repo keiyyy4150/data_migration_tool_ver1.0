@@ -1,4 +1,4 @@
-　Option Explicit
+Option Explicit
 
 '==============================
 ' 共通定数・共有変数
@@ -538,15 +538,62 @@ Private Function BuildValueModeRaw(colIndex As Long, baseTbl As String, baseRow 
     BuildValueModeRaw = v
 End Function
 
-'--- CONCATモード raw値生成（各トークン値を無加工で取得→改行連結） ---
+'=== CONCAT 用：F列1アイテムの解析（条件書式対応） =========================
+'  形式1: "T.c"                    → token="T.c", hasCond=False
+'  形式2: "T.c=◯→文字"            → token="T.c", hasCond=True, cond="◯", label="文字"
+Private Sub ParseConcatSpec(ByVal part As String, _
+                            ByRef token As String, _
+                            ByRef hasCond As Boolean, _
+                            ByRef cond As String, _
+                            ByRef label As String)
+    Dim s As String, posArrow As Long, leftPart As String, posEq As Long
+    s = Trim$(part)
+    hasCond = False: cond = "": label = "": token = ""
+    
+    posArrow = InStr(s, "→")
+    If posArrow > 0 Then
+        leftPart = Trim$(Left$(s, posArrow - 1))     ' "T.c=◯"
+        label = Mid$(s, posArrow + Len("→"))         ' "文字"
+        posEq = InStr(leftPart, "=")
+        If posEq > 0 Then
+            token = Trim$(Left$(leftPart, posEq - 1)) ' "T.c"
+            cond = Mid$(leftPart, posEq + 1)          ' "◯"
+            hasCond = True
+        Else
+            token = leftPart ' 念のため
+        End If
+    Else
+        token = s
+    End If
+End Sub
+
+'--- CONCATモード raw値生成（各トークン値を無加工で取得→改行連結 / 条件対応） ---
 Private Function BuildConcatRawValue(def As String, baseTbl As String, baseRow As Long, myKey As String) As String
-    Dim items() As String, i As Long, part As String, v As String, acc As String
+    Dim items() As String, i As Long, spec As String, v As String, acc As String
+    Dim token As String, hasCond As Boolean, cond As String, label As String, raw As String
     items = Split(def, "|")
     acc = ""
     For i = LBound(items) To UBound(items)
-        part = Trim$(items(i)) ' 例: "A.col1"
-        v = ResolveTokenRaw(part, baseTbl, baseRow, myKey) ' 無加工値
-        If acc = "" Then acc = v Else acc = acc & vbLf & v
+        spec = Trim$(items(i)) ' 例: "A.col1" or "A.col1=◯→カラム1"
+        If Len(spec) = 0 Then GoTo CONTI
+        
+        ParseConcatSpec spec, token, hasCond, cond, label
+        
+        If hasCond Then
+            raw = ResolveTokenRaw(token, baseTbl, baseRow, myKey)
+            If CStr(raw) = cond Then
+                v = label
+            Else
+                v = "" ' スキップ
+            End If
+        Else
+            v = ResolveTokenRaw(token, baseTbl, baseRow, myKey)
+        End If
+        
+        If Len(v) > 0 Then
+            If Len(acc) = 0 Then acc = v Else acc = acc & vbLf & v
+        End If
+CONTI:
     Next
     BuildConcatRawValue = acc
 End Function
@@ -574,7 +621,6 @@ Private Function ReplaceTokensWithRaw(def As String, baseTbl As String, baseRow 
         If pos2 = 0 Then Exit Do
         token = Mid$(s, pos + 1, pos2 - pos - 1) ' "A.col"
         valStr = ResolveTokenRaw(token, baseTbl, baseRow, myKey)
-        ' 非数値が混ざると計算不能 → 非数値は0扱い
         If Not IsNumeric(valStr) Then valStr = "0"
         s = Left$(s, pos - 1) & valStr & Mid$(s, pos2 + 1)
         pos = InStr(pos + Len(valStr), s, "{")
@@ -599,7 +645,6 @@ Private Function ApplyTemplate(def As String, baseTbl As String, baseRow As Long
         s = Left$(s, pos - 1) & valStr & Mid$(s, pos2 + 1)
         pos = InStr(pos + Len(valStr), s, "{")
     Loop
-    ' テンプレの外側のダブルクォートを外して返す（"..." を ... に）
     ApplyTemplate = Replace(s, """", "")
 End Function
 
@@ -619,10 +664,8 @@ Private Function ResolveTokenProcessed(token As String, baseTbl As String, baseR
     Dim raw As Variant
     raw = ResolveTokenRaw(token, baseTbl, baseRow, myKey)
     If outColIndex <= 0 Then
-        ' 呼び出し元で列インデックスを渡さない場合はTEXT扱いでそのまま
         ResolveTokenProcessed = CStr(raw)
     Else
-        ' その出力列に定義された型/ロジックをトークン個々にも適用
         ResolveTokenProcessed = ApplyOneValueTransform(raw, m_dataType(outColIndex), m_logic(outColIndex))
     End If
 End Function
@@ -639,13 +682,13 @@ Private Function ApplyTransformSmart(src As Variant) As Variant
         For c = 1 To cols
             Select Case m_mode(c)
                 Case "CONCAT"
-                    ' 定義の各トークンを「加工してから」改行で結合
+                    ' 定義の各トークンを「加工/条件適用してから」改行で結合
                     dst(r, c) = BuildConcatProcessedValue(m_def(c), m_baseTblName, m_baseRowIdx(r), GetKeyForRow(r), c)
+                    dst(r, c) = FinalizeByType(dst(r, c), m_dataType(c)) ' 最後に列型で仕上げ
                 Case "EXPR"
                     If InStr(m_def(c), """") > 0 Then
                         ' テンプレはトークン加工後で展開
                         dst(r, c) = ApplyTemplate(m_def(c), m_baseTblName, m_baseRowIdx(r), GetKeyForRow(r), True)
-                        ' 最終的なセル型はB列で制御（TEXTならそのまま、DATEなら後で日付整形でもOK）
                         dst(r, c) = FinalizeByType(dst(r, c), m_dataType(c))
                     Else
                         ' 数式：トークン加工後に評価（非数値は0）
@@ -687,15 +730,48 @@ Private Function ApplyOneValueTransform(v As Variant, dataType As String, logic 
     ApplyOneValueTransform = CStr(w)
 End Function
 
-'--- CONCAT：各トークンを加工してから改行結合 ---
+'--- 列型に合わせた最終整形（置換ロジックは適用しない） ---
+Private Function FinalizeByType(v As Variant, dataType As String) As String
+    Select Case UCase$(dataType)
+        Case "NUMBER"
+            If IsNumeric(v) And Len(v) > 0 Then FinalizeByType = CStr(CLng(v)) Else FinalizeByType = ""
+        Case "DATE"
+            If IsDate(v) And Len(v) > 0 Then FinalizeByType = Format$(CDate(v), "yyyy/mm/dd") Else FinalizeByType = ""
+        Case Else
+            FinalizeByType = CStr(v)
+    End Select
+End Function
+
+'--- CONCAT：各トークンを加工＋条件適用してから改行結合 ---
 Private Function BuildConcatProcessedValue(def As String, baseTbl As String, baseRow As Long, myKey As String, outColIndex As Long) As String
-    Dim items() As String, i As Long, part As String, v As String, acc As String
+    Dim items() As String, i As Long, spec As String, acc As String, v As String
+    Dim token As String, hasCond As Boolean, cond As String, label As String, raw As String
+    
     items = Split(def, "|")
     acc = ""
     For i = LBound(items) To UBound(items)
-        part = Trim$(items(i)) ' "A.col"
-        v = ResolveTokenProcessed(part, baseTbl, baseRow, myKey, outColIndex)
-        If acc = "" Then acc = v Else acc = acc & vbLf & v
+        spec = Trim$(items(i))
+        If Len(spec) = 0 Then GoTo CONTI
+        
+        ParseConcatSpec spec, token, hasCond, cond, label
+        
+        If hasCond Then
+            ' 条件比較はRAWで（要件：完全一致なら置換文字列、違えばスキップ）
+            raw = ResolveTokenRaw(token, baseTbl, baseRow, myKey)
+            If CStr(raw) = cond Then
+                v = label                  ' ラベルはそのまま出す（列Cの置換は適用しない）
+            Else
+                v = ""                     ' スキップ
+            End If
+        Else
+            ' 通常トークンは「その列の型/ロジック」を適用
+            v = ResolveTokenProcessed(token, baseTbl, baseRow, myKey, outColIndex)
+        End If
+        
+        If Len(v) > 0 Then
+            If Len(acc) = 0 Then acc = v Else acc = acc & vbLf & v
+        End If
+CONTI:
     Next
     BuildConcatProcessedValue = acc
 End Function
@@ -1035,9 +1111,7 @@ End Sub
 ' 簡易数式評価（+ - * / と () のみ）
 '==============================
 Private Function SafeEval(ByVal expr As String) As Double
-    ' 空白除去
     expr = Replace(expr, " ", "")
-    ' トークン化
     Dim nums() As Double, ops() As String, nTop As Long, oTop As Long
     ReDim nums(1 To 1): ReDim ops(1 To 1): nTop = 0: oTop = 0
     
@@ -1059,7 +1133,7 @@ Private Function SafeEval(ByVal expr As String) As Double
             Do While oTop > 0 And ops(oTop) <> "("
                 ApplyOp nums, nTop, ops, oTop
             Loop
-            If oTop > 0 And ops(oTop) = "(" Then oTop = oTop - 1 ' pop "("
+            If oTop > 0 And ops(oTop) = "(" Then oTop = oTop - 1
         ElseIf ch = "+" Or ch = "-" Or ch = "*" Or ch = "/" Then
             Do While oTop > 0 And Precedence(ops(oTop)) >= Precedence(ch)
                 ApplyOp nums, nTop, ops, oTop
