@@ -1,56 +1,44 @@
 Option Explicit
 
-'==============================
-' 共通定数・共有状態
-'==============================
+'=== フォルダ名 ===
 Public Const IMPORT_FOLDER As String = "importFiles"
 Public Const EXPORT_FOLDER As String = "exportFiles"
 Public Const LOG_FOLDER    As String = "log"
 
-' エンコード（AUTO/UTF-8/SHIFT_JIS/UTF-16LE）
-Public CurrentEncodingMode As String
+'=== パイプラインで使うテーブル名（ListObject名） ===
+Public CurrentMappingTableName As String ' Mapping_Main / Mapping_List
+Public CurrentMasterTableName  As String ' Master_Main  / Master_List
+Public CurrentExportPrefix     As String ' MAIN_ / LIST_
 
-' 現在のターゲット（Main / List）…モジュール横断で参照
-Public CurrentMappingTableName As String ' "Mapping_Main" / "Mapping_List"
-Public CurrentMasterTableName  As String ' "Master_Main"  / "Master_List"
-Public CurrentExportPrefix     As String ' "MAIN_" / "LIST_"
+'=== エンコード設定 ===
+Public CurrentEncodingMode As String ' "AUTO" / "UTF-8" / "SHIFT_JIS" / "UTF-16LE"
 
-' 取り込んだ各テーブル(=CSV)の2次元配列（Key: テーブル名, Value: Variant(2D)）
-Public TableData As Object  ' Scripting.Dictionary
-' 各テーブルのキー検索用ハッシュ（Key: テーブル名, Value: Dictionary(KeyString -> 行Index)）
-Public KeyIndex As Object   ' Scripting.Dictionary
-
-' 無加工JOIN済みの配列
-Public RawJoined As Variant
+'=== インポート済みフラグ・加工状態 ===
 Public HasRaw As Boolean
-' Masterが加工後かどうか（出力名に使用）
 Public IsProcessed As Boolean
 
-' ---- Mappingキャッシュ ----
-' 列構成：A:No, B:出力カラム, C:型, D:ロジック, E:キー, F:モード, G:定義, H以降：テーブルごとの元カラム
-Public m_outCols()  As String  ' B
-Public m_dataType() As String  ' C
-Public m_logic()    As String  ' D
-Public m_isKey()    As Boolean ' E
-Public m_mode()     As String  ' F
-Public m_def()      As String  ' G
+'=== 取り込んだ各テーブルの配列とキー索引 ===
+'  TableData("tbA") = Variant(2D): CSVの全データ（1行目=ヘッダ）
+'  KeyIndex("tbA")  = Dictionary(keyStr -> 行Index(2〜))
+Public TableData As Object ' Scripting.Dictionary
+Public KeyIndex  As Object ' Scripting.Dictionary
 
-' テーブル名（H1以降）
-Public m_tblNames() As String
-' 行=出力列, 列=テーブル：元カラム名（VALUE時のみ使用）
-Public m_srcCols    As Variant
+'=== 「無加工JOIN（行複製込み）」結果（Masterへ貼り付ける材料） ===
+Public RawJoined As Variant
 
-' JOIN用
-Public m_baseTblName As String
-Public m_baseRowIdx() As Long
-
-'==============================
-' ユーティリティ
-'==============================
-Public Sub EnsureFolder(pathWithSlash As String)
-    If Len(Dir(pathWithSlash, vbDirectory)) = 0 Then MkDir pathWithSlash
+'-------------------------------------------------------------------------------
+' パイプライン切り替え（ボタンやショートカットから呼ぶ）
+'-------------------------------------------------------------------------------
+Public Sub UsePipelineMain()
+    CurrentMappingTableName = "Mapping_Main"
+    CurrentMasterTableName  = "Master_Main"
+    CurrentExportPrefix     = "MAIN_"
+    WriteLog "INFO", "Switched pipeline: Main"
 End Sub
 
-Public Function TimeStamp() As String
-    TimeStamp = Format(Now, "yyyymmdd_hhnnss")
-End Function
+Public Sub UsePipelineList()
+    CurrentMappingTableName = "Mapping_List"
+    CurrentMasterTableName  = "Master_List"
+    CurrentExportPrefix     = "LIST_"
+    WriteLog "INFO", "Switched pipeline: List"
+End Sub
