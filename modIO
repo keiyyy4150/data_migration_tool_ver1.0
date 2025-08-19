@@ -1,0 +1,140 @@
+Option Explicit
+
+'=========== 読み込み：テキスト ===========
+Public Function ReadTextFile(filePath As String, encMode As String) As String
+    Dim mode As String: mode = UCase$(encMode)
+    If mode = "AUTO" Then mode = DetectEncoding(filePath)
+    Dim stm As Object: Set stm = CreateObject("ADODB.Stream")
+    stm.Type = 2 ' text
+    Select Case mode
+        Case "UTF-8":     stm.Charset = "utf-8"
+        Case "UTF-16LE":  stm.Charset = "unicode"
+        Case "SHIFT_JIS": stm.Charset = "shift_jis"
+        Case Else:        stm.Charset = "shift_jis"
+    End Select
+    stm.Open
+    stm.LoadFromFile filePath
+    ReadTextFile = stm.ReadText(-1)
+    stm.Close
+    Set stm = Nothing
+End Function
+
+Private Function DetectEncoding(filePath As String) As String
+    Dim f As Integer, b1 As Byte, b2 As Byte, b3 As Byte
+    On Error GoTo FAIL
+    f = FreeFile
+    Open filePath For Binary As #f
+    If LOF(f) >= 2 Then
+        Get #f, , b1: Get #f, , b2
+        If b1 = &HEF And b2 = &HBB And LOF(f) >= 3 Then
+            Get #f, , b3
+            If b3 = &HBF Then DetectEncoding = "UTF-8": Close #f: Exit Function
+        ElseIf b1 = &HFF And b2 = &HFE Then
+            DetectEncoding = "UTF-16LE": Close #f: Exit Function
+        End If
+    End If
+    Close #f
+FAIL:
+    If Len(DetectEncoding) = 0 Then DetectEncoding = "SHIFT_JIS"
+End Function
+
+'=========== 書き込み：テキスト ===========
+Public Sub WriteTextFile(filePath As String, ByVal content As String, encMode As String)
+    Dim stm As Object: Set stm = CreateObject("ADODB.Stream")
+    Dim mode As String: mode = UCase$(encMode)
+    If mode = "AUTO" Then mode = "UTF-8" ' AUTOはUTF-8で出力
+    stm.Type = 2 ' text
+    Select Case mode
+        Case "UTF-8":     stm.Charset = "utf-8"
+        Case "UTF-16LE":  stm.Charset = "unicode"
+        Case "SHIFT_JIS": stm.Charset = "shift_jis"
+        Case Else:        stm.Charset = "utf-8"
+    End Select
+    stm.Open
+    stm.WriteText content
+    stm.SaveToFile filePath, 2
+    stm.Close
+    Set stm = Nothing
+End Sub
+
+'=========== CSV読み込み（RFC4180簡易：改行/引用符対応） ===========
+Public Function ParseCsvFile(filePath As String) As Variant
+    Dim text As String
+    text = ReadTextFile(filePath, CurrentEncodingMode)
+    ParseCsvFile = ParseCsvText(text)
+End Function
+
+Public Function ParseCsvText(ByVal txt As String) As Variant
+    Dim i As Long, ch As String * 1
+    Dim inQuote As Boolean
+    Dim field As String, row As Collection, rows As Collection
+    Set rows = New Collection
+    Set row = New Collection
+    field = "": inQuote = False
+    
+    For i = 1 To Len(txt)
+        ch = Mid$(txt, i, 1)
+        If inQuote Then
+            If ch = """" Then
+                If i < Len(txt) And Mid$(txt, i + 1, 1) = """" Then
+                    field = field & """": i = i + 1
+                Else
+                    inQuote = False
+                End If
+            Else
+                field = field & ch
+            End If
+        Else
+            Select Case ch
+                Case """": inQuote = True
+                Case ",":  row.Add field: field = ""
+                Case vbCr ' ignore
+                Case vbLf: row.Add field: field = "": rows.Add row: Set row = New Collection
+                Case Else: field = field & ch
+            End Select
+        End If
+    Next i
+    row.Add field: rows.Add row
+    
+    Dim maxCol As Long, r As Long
+    For r = 1 To rows.Count
+        If rows(r).Count > maxCol Then maxCol = rows(r).Count
+    Next r
+    
+    Dim result() As Variant, rr As Long, cc As Long
+    If rows.Count = 0 Then ReDim result(1 To 1, 1 To 1): result(1, 1) = "": ParseCsvText = result: Exit Function
+    
+    ReDim result(1 To rows.Count, 1 To maxCol)
+    For rr = 1 To rows.Count
+        For cc = 1 To rows(rr).Count
+            result(rr, cc) = rows(rr)(cc)
+        Next cc
+        For cc = rows(rr).Count + 1 To maxCol
+            result(rr, cc) = ""
+        Next cc
+    Next rr
+    ParseCsvText = result
+End Function
+
+'=========== CSV書き出し ===========
+Public Sub WriteRangeAsCsvWithEncoding(lo As ListObject, filePath As String, encMode As String)
+    Dim arr As Variant, rows As Long, cols As Long
+    Dim sb As String, r As Long, c As Long, line As String, cell As String
+    
+    arr = lo.DataBodyRange.Value
+    rows = UBound(arr, 1): cols = UBound(arr, 2)
+    sb = ""
+    For r = 1 To rows
+        line = ""
+        For c = 1 To cols
+            cell = CStr(arr(r, c))
+            If InStr(cell, """") > 0 Then cell = Replace(cell, """", """""")
+            If InStr(cell, ",") > 0 Or InStr(cell, vbCr) > 0 Or InStr(cell, vbLf) > 0 Then
+                cell = """" & cell & """"
+            End If
+            line = line & cell & IIf(c < cols, ",", "")
+        Next c
+        sb = sb & line & vbCrLf
+    Next r
+    WriteTextFile filePath, sb, encMode
+End Sub
