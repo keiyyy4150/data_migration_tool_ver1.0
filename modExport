@@ -1,31 +1,36 @@
 Option Explicit
 
+'==============================
+' Export：Masterの現在値を CSV 出力
+'==============================
 Public Sub ExportCSV()
     On Error GoTo EH
+    Dim tStart As Date: tStart = Now
     If Len(CurrentMasterTableName) = 0 Then UsePipelineMain
-    
-    Dim masterTbl As ListObject
-    Set masterTbl = ThisWorkbook.ListObjects(CurrentMasterTableName)
-    If masterTbl.DataBodyRange Is Nothing Then
+
+    Dim basePath As String: basePath = ThisWorkbook.Path
+    Dim exportPath As String: exportPath = basePath & "\" & EXPORT_FOLDER & "\"
+    EnsureFolder exportPath
+    EnsureFolder basePath & "\" & LOG_FOLDER & "\"
+
+    Dim lo As ListObject: Set lo = ThisWorkbook.ListObjects(CurrentMasterTableName)
+    If lo Is Nothing Or lo.DataBodyRange Is Nothing Then
         MsgBox "出力対象のデータがありません。", vbExclamation
         Exit Sub
     End If
-    
-    Dim basePath As String, exportPath As String, autoName As String, tStart As Date
-    tStart = Now
-    basePath = ThisWorkbook.Path
-    exportPath = basePath & "\" & EXPORT_FOLDER & "\"
-    EnsureFolder exportPath
-    EnsureFolder basePath & "\" & LOG_FOLDER & "\"
-    
+
+    Dim autoName As String
     If IsProcessed Then
         autoName = CurrentExportPrefix & "export_processed_" & TimeStamp() & ".csv"
     Else
         autoName = CurrentExportPrefix & "export_raw_" & TimeStamp() & ".csv"
     End If
-    
-    WriteRangeAsCsvWithEncoding masterTbl, exportPath & autoName, CurrentEncodingMode
-    WriteLog "INFO", "ExportCSV: " & exportPath & autoName & " / Encoding=" & CurrentEncodingMode & " / rows=" & masterTbl.DataBodyRange.Rows.Count & " / elapsed=" & Format(Now - tStart, "hh:nn:ss")
+
+    Dim csv As String: csv = BuildCsvTextFromRange(lo)
+    WriteTextFile exportPath & autoName, csv, CurrentEncodingMode
+
+    WriteLog "INFO", "ExportCSV: " & exportPath & autoName & " / Encoding=" & CurrentEncodingMode & _
+                     " / rows=" & lo.DataBodyRange.Rows.Count & " / elapsed=" & Format(Now - tStart, "hh:nn:ss")
     MsgBox "CSV出力しました：" & exportPath & autoName, vbInformation
     Exit Sub
 EH:
