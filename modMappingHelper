@@ -1,0 +1,99 @@
+Option Explicit
+
+'=== Mapping テーブルを読む（ListObject名で参照） ===
+Public Function ReadMappingFromTableName(mappingTableName As String) As Boolean
+    Dim mapTbl As ListObject
+    On Error GoTo FAIL
+    Set mapTbl = ThisWorkbook.ListObjects(mappingTableName)
+    ReadMappingFromTableName = ReadMappingFromTable(mapTbl)
+    Exit Function
+FAIL:
+    ReadMappingFromTableName = False
+End Function
+
+Public Function ReadMappingFromTable(mapTbl As ListObject) As Boolean
+    On Error GoTo FAIL
+    Dim lastRow As Long, lastCol As Long
+    Dim r As Long, c As Long, tCount As Long
+    Dim hdr As Range, body As Range
+    Set hdr = mapTbl.HeaderRowRange
+    Set body = mapTbl.DataBodyRange
+    If body Is Nothing Then GoTo FAIL
+    
+    lastRow = body.Rows.Count
+    lastCol = mapTbl.Range.Columns.Count  ' テーブル全体の列数
+    
+    ' 列割当（A:No, B:出力, C:型, D:ロジック, E:キー, F:モード, G:定義, H〜：テーブル群）
+    Const colNo& = 1, colOut& = 2, colType& = 3, colLogic& = 4, colKey& = 5, colMode& = 6, colDef& = 7
+    Dim firstTableCol&: firstTableCol = 8
+    
+    ReDim m_outCols(1 To lastRow)
+    ReDim m_dataType(1 To lastRow)
+    ReDim m_logic(1 To lastRow)
+    ReDim m_isKey(1 To lastRow)
+    ReDim m_mode(1 To lastRow)
+    ReDim m_def(1 To lastRow)
+    
+    For r = 1 To lastRow
+        m_outCols(r)  = CStr(body.Cells(r, colOut).Value)
+        m_dataType(r) = UCase$(Trim$(CStr(body.Cells(r, colType).Value)))
+        m_logic(r)    = CStr(body.Cells(r, colLogic).Value)
+        m_isKey(r)    = (CStr(body.Cells(r, colKey).Value) = "○")
+        m_mode(r)     = UCase$(Trim$(CStr(body.Cells(r, colMode).Value)))
+        If Len(m_mode(r)) = 0 Then m_mode(r) = "VALUE"
+        m_def(r)      = CStr(body.Cells(r, colDef).Value)
+    Next r
+    
+    If lastCol >= firstTableCol Then
+        tCount = lastCol - firstTableCol + 1
+        ReDim m_tblNames(0 To tCount - 1)
+        For c = firstTableCol To lastCol
+            m_tblNames(c - firstTableCol) = CStr(hdr.Cells(1, c).Value)
+        Next c
+        
+        ReDim m_srcCols(1 To lastRow, 0 To tCount - 1)
+        For r = 1 To lastRow
+            For c = 0 To tCount - 1
+                m_srcCols(r, c) = CStr(body.Cells(r, firstTableCol + c).Value)
+            Next c
+        Next r
+    Else
+        ReDim m_tblNames(0 To -1)
+        ReDim m_srcCols(1 To 1, 0 To 0)
+    End If
+    
+    ReadMappingFromTable = True
+    Exit Function
+FAIL:
+    ReadMappingFromTable = False
+End Function
+
+'=== テーブル配列のヘッダから列番号を取得 ===
+Public Function FindColumnIndex(arr As Variant, colName As String) As Long
+    Dim c As Long
+    For c = 1 To UBound(arr, 2)
+        If CStr(arr(1, c)) = colName Then FindColumnIndex = c: Exit Function
+    Next
+    FindColumnIndex = 0
+End Function
+
+'=== テーブル名配列からインデックス ===
+Public Function IndexOfTable(tblNames() As String, name As String) As Long
+    Dim i As Long
+    For i = LBound(tblNames) To UBound(tblNames)
+        If tblNames(i) = name Then IndexOfTable = i: Exit Function
+    Next
+    IndexOfTable = -1
+End Function
+
+'=== 1行から複合キー文字列を生成 ===
+Public Function BuildKeyFromRow(arr As Variant, rowIdx As Long, keyColIdx() As Long) As String
+    Dim i As Long, s As String: s = ""
+    If Not Not keyColIdx Then
+        For i = LBound(keyColIdx) To UBound(keyColIdx)
+            If keyColIdx(i) > 0 Then s = s & "|" & CStr(arr(rowIdx, keyColIdx(i)))
+        Next
+    End If
+    If Len(s) > 0 Then s = Mid$(s, 2)
+    BuildKeyFromRow = s
+End Function
