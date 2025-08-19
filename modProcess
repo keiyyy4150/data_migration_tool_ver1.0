@@ -1,27 +1,13 @@
 Option Explicit
 
-'=== パイプライン切替（Main / List） ===
-Public Sub UsePipelineMain()
-    CurrentMappingTableName = "Mapping_Main"
-    CurrentMasterTableName  = "Master_Main"
-    CurrentExportPrefix     = "MAIN_"
-    WriteLog "INFO", "Switched pipeline: Main"
-End Sub
-
-Public Sub UsePipelineList()
-    CurrentMappingTableName = "Mapping_List"
-    CurrentMasterTableName  = "Master_List"
-    CurrentExportPrefix     = "LIST_"
-    WriteLog "INFO", "Switched pipeline: List"
-End Sub
-
-'=== エンコード選択 ===
+'==============================
+' ユーザー操作：エンコード選択
+'==============================
 Public Sub ChooseEncoding()
     Dim s As String
-    s = InputBox( _
-        "読み込み・書き出しのエンコードを指定してください。" & vbCrLf & _
-        "AUTO / UTF-8 / Shift_JIS / UTF-16LE", _
-        "Encoding Mode", IIf(Len(CurrentEncodingMode) = 0, "AUTO", CurrentEncodingMode))
+    s = InputBox("読み込み・書き出しのエンコードを指定してください。" & vbCrLf & _
+                 "AUTO / UTF-8 / Shift_JIS / UTF-16LE", _
+                 "Encoding Mode", IIf(Len(CurrentEncodingMode) = 0, "AUTO", CurrentEncodingMode))
     If s = "False" Then Exit Sub
     s = UCase$(Trim$(s))
     Select Case s
@@ -35,44 +21,48 @@ Public Sub ChooseEncoding()
     MsgBox "Encoding Mode: " & CurrentEncodingMode, vbInformation
 End Sub
 
-'=== Import：CSV読込→JOIN→Masterへ無加工貼付 ===
+'==============================
+' Import：CSV読込→JOIN→Masterへ無加工貼付
+'==============================
 Public Sub ImportFiles()
     On Error GoTo EH
     Dim tStart As Date: tStart = Now
     If Len(CurrentEncodingMode) = 0 Then CurrentEncodingMode = "AUTO"
     If Len(CurrentMappingTableName) = 0 Then UsePipelineMain
-    
-    Dim ok As Boolean
-    ok = ReadMappingFromTableName(CurrentMappingTableName)
-    If Not ok Then
+
+    ' 1) Mapping 読込
+    If Not ReadMappingFromTableName(CurrentMappingTableName) Then
         WriteLog "ERROR", "Mapping read failed"
         MsgBox "Mappingの読み取りに失敗しました。", vbCritical
         Exit Sub
     End If
-    
+
+    ' 2) CSV 読込
     Dim importPath As String: importPath = ThisWorkbook.Path & "\" & IMPORT_FOLDER & "\"
     EnsureFolder ThisWorkbook.Path & "\" & LOG_FOLDER & "\"
     WriteLog "INFO", "ImportFiles: start / Encoding=" & CurrentEncodingMode & " / MappingTable=" & CurrentMappingTableName
-    
+
     Set TableData = CreateObject("Scripting.Dictionary")
-    If Not LoadAllCsv(importPath, m_tblNames, TableData) Then
+    If Not LoadAllCsv(importPath, GetMappingTableNames(), TableData) Then
         WriteLog "ERROR", "LoadAllCsv failed"
         Exit Sub
     End If
-    
+
+    ' 3) キー索引（1:1）
     Set KeyIndex = CreateObject("Scripting.Dictionary")
-    BuildAllKeyIndexes m_tblNames, m_srcCols, m_isKey, TableData, KeyIndex
-    
-    m_baseTblName = PickBaseTableName(m_tblNames, m_srcCols, m_isKey)
-    If Len(m_baseTblName) = 0 And (Not Not m_tblNames) <> 0 Then m_baseTblName = m_tblNames(0)
-    WriteLog "INFO", "BaseTable=" & m_baseTblName
-    
-    RawJoined = BuildJoinedRaw(m_baseTblName)
+    BuildKeyIndexes KeyIndex
+
+    ' 4) ベーステーブル決定 → 無加工JOIN（1:N行複製）
+    Dim baseTbl As String: baseTbl = PickBaseTableName()
+    RawJoined = BuildJoinedRaw(baseTbl)
     HasRaw = True: IsProcessed = False
-    
-    PasteToMasterByTable ThisWorkbook.ListObjects(CurrentMasterTableName), RawJoined
-    
-    WriteLog "INFO", "ImportFiles: done / rows=" & UBound(RawJoined, 1) & " / cols=" & UBound(RawJoined, 2) & " / elapsed=" & Format(Now - tStart, "hh:nn:ss")
+
+    ' 5) Masterへ貼付
+    Dim lo As ListObject: Set lo = ThisWorkbook.ListObjects(CurrentMasterTableName)
+    PasteToMasterByTable lo, RawJoined
+
+    WriteLog "INFO", "ImportFiles: done / rows=" & UBound(RawJoined, 1) & " / cols=" & UBound(RawJoined, 2) & _
+                     " / elapsed=" & Format(Now - tStart, "hh:nn:ss")
     MsgBox "ファイルインポート完了（無加工をMasterへ反映）", vbInformation
     Exit Sub
 EH:
@@ -80,7 +70,9 @@ EH:
     MsgBox "ImportFilesでエラー: " & Err.Description, vbCritical
 End Sub
 
-'=== Process：加工適用 ===
+'==============================
+' Process：加工適用（VALUE/CONCAT/EXPR）
+'==============================
 Public Sub ProcessData()
     On Error GoTo EH
     Dim tStart As Date: tStart = Now
@@ -89,22 +81,22 @@ Public Sub ProcessData()
         Exit Sub
     End If
     If Len(CurrentMappingTableName) = 0 Then UsePipelineMain
-    
-    Dim ok As Boolean
-    ok = ReadMappingFromTableName(CurrentMappingTableName)
-    If Not ok Then
+
+    If Not ReadMappingFromTableName(CurrentMappingTableName) Then
         WriteLog "ERROR", "Mapping read failed in ProcessData"
         MsgBox "Mappingの読み取りに失敗しました。", vbCritical
         Exit Sub
     End If
-    
+
     Dim procArr As Variant
     procArr = ApplyTransformSmart(RawJoined)
-    
-    PasteToMasterByTable ThisWorkbook.ListObjects(CurrentMasterTableName), procArr
+
+    Dim lo As ListObject: Set lo = ThisWorkbook.ListObjects(CurrentMasterTableName)
+    PasteToMasterByTable lo, procArr
     IsProcessed = True
-    
-    WriteLog "INFO", "ProcessData: done / rows=" & UBound(procArr, 1) & " / cols=" & UBound(procArr, 2) & " / elapsed=" & Format(Now - tStart, "hh:nn:ss")
+
+    WriteLog "INFO", "ProcessData: done / rows=" & UBound(procArr, 1) & " / cols=" & UBound(procArr, 2) & _
+                     " / elapsed=" & Format(Now - tStart, "hh:nn:ss")
     MsgBox "データ加工完了（Masterへ反映）", vbInformation
     Exit Sub
 EH:
@@ -112,27 +104,27 @@ EH:
     MsgBox "ProcessDataでエラー: " & Err.Description, vbCritical
 End Sub
 
-'=== Clear：Masterの値と中間データ破棄 ===
+'==============================
+' Clear：Masterクリア＆中間破棄
+'==============================
 Public Sub ClearData()
     On Error Resume Next
-    Dim masterTbl As ListObject
-    If Len(CurrentMasterTableName) = 0 Then UsePipelineMain
-    Set masterTbl = ThisWorkbook.ListObjects(CurrentMasterTableName)
-    If Not masterTbl Is Nothing Then
-        If Not masterTbl.DataBodyRange Is Nothing Then masterTbl.DataBodyRange.ClearContents
-    End If
+    Dim lo As ListObject: Set lo = ThisWorkbook.ListObjects(CurrentMasterTableName)
+    If Not lo Is Nothing Then If Not lo.DataBodyRange Is Nothing Then lo.DataBodyRange.ClearContents
     On Error GoTo 0
-    
+
     HasRaw = False: IsProcessed = False
-    Erase RawJoined: Erase m_baseRowIdx
-    m_baseTblName = ""
+    Erase RawJoined: Erase Join_BaseRowIdx
+    Join_BaseTableName = ""
     Set TableData = Nothing: Set KeyIndex = Nothing
-    
+
     WriteLog "INFO", "ClearData: Master cleared & memory freed"
     MsgBox "初期化しました。", vbInformation
 End Sub
 
-'=== Masterへ貼付（テーブル名） ===
+'==============================
+' Masterへ貼付（テーブル名で）
+'==============================
 Public Sub PasteToMasterByTable(masterTbl As ListObject, dataArr As Variant)
     Dim rows As Long, cols As Long
     rows = UBound(dataArr, 1): cols = UBound(dataArr, 2)
