@@ -1,99 +1,90 @@
 Option Explicit
 
-'=== Mapping テーブルを読む（ListObject名で参照） ===
-Public Function ReadMappingFromTableName(mappingTableName As String) As Boolean
-    Dim mapTbl As ListObject
+'==============================
+' Mapping キャッシュ（他モジュールから参照するため Public）
+'==============================
+Public Map_OutCols()  As String  ' A: 出力カラム名
+Public Map_DataType() As String  ' B: データ型（TEXT/NUMBER/DATE）
+Public Map_Logic()    As String  ' C: 置換（"a→b;..."）※完全一致のみ
+Public Map_IsKey()    As Boolean ' D: キー（○）
+Public Map_Mode()     As String  ' E: モード（VALUE/CONCAT/EXPR）
+Public Map_Def()      As String  ' F: 定義（CONCAT列挙 or EXPR式/テンプレ）
+
+' G列以降（1行目：テーブル名） / 行=出力列, 列=テーブル：元カラム
+Public Map_TblNames() As String
+Public Map_SrcCols    As Variant
+
+' 1:N 展開の対象子テーブル（同シートの名前付き範囲 ExpandByTable）
+Public Map_ExpandByTableName As String
+
+'==============================
+' Mapping 読み込み（ListObject名で）
+'==============================
+Public Function ReadMappingFromTableName(mappingLoName As String) As Boolean
     On Error GoTo FAIL
-    Set mapTbl = ThisWorkbook.ListObjects(mappingTableName)
-    ReadMappingFromTableName = ReadMappingFromTable(mapTbl)
+    Dim lo As ListObject: Set lo = ThisWorkbook.ListObjects(mappingLoName)
+    Dim lastRow As Long, lastCol As Long
+    lastRow = lo.DataBodyRange.Rows.Count + 1 ' +ヘッダ
+    lastCol = lo.HeaderRowRange.Columns.Count
+    If lastRow < 2 Or lastCol < 5 Then GoTo FAIL
+
+    Dim i As Long, j As Long, tCount As Long
+    ReDim Map_OutCols(1 To lastRow - 1)
+    ReDim Map_DataType(1 To lastRow - 1)
+    ReDim Map_Logic(1 To lastRow - 1)
+    ReDim Map_IsKey(1 To lastRow - 1)
+    ReDim Map_Mode(1 To lastRow - 1)
+    ReDim Map_Def(1 To lastRow - 1)
+
+    For i = 2 To lastRow
+        Map_OutCols(i - 1)  = CStr(lo.Parent.Cells(lo.HeaderRowRange.Row + i - 2, lo.HeaderRowRange.Column + 0).Value)
+        Map_DataType(i - 1) = UCase$(Trim$(CStr(lo.Parent.Cells(lo.HeaderRowRange.Row + i - 2, lo.HeaderRowRange.Column + 1).Value)))
+        Map_Logic(i - 1)    = CStr(lo.Parent.Cells(lo.HeaderRowRange.Row + i - 2, lo.HeaderRowRange.Column + 2).Value)
+        Map_IsKey(i - 1)    = (CStr(lo.Parent.Cells(lo.HeaderRowRange.Row + i - 2, lo.HeaderRowRange.Column + 3).Value) = "○")
+        Map_Mode(i - 1)     = UCase$(Trim$(CStr(lo.Parent.Cells(lo.HeaderRowRange.Row + i - 2, lo.HeaderRowRange.Column + 4).Value)))
+        If Len(Map_Mode(i - 1)) = 0 Then Map_Mode(i - 1) = "VALUE"
+        Map_Def(i - 1)      = CStr(lo.Parent.Cells(lo.HeaderRowRange.Row + i - 2, lo.HeaderRowRange.Column + 5).Value)
+    Next
+
+    tCount = Application.Max(0, lastCol - 6)
+    ReDim Map_TblNames(0 To IIf(tCount > 0, tCount - 1, 0))
+    If tCount > 0 Then
+        For j = 7 To (6 + tCount)
+            Map_TblNames(j - 7) = CStr(lo.Parent.Cells(lo.HeaderRowRange.Row, lo.HeaderRowRange.Column + j - 1).Value)
+        Next
+        ReDim Map_SrcCols(1 To lastRow - 1, 0 To tCount - 1)
+        For i = 2 To lastRow
+            For j = 0 To tCount - 1
+                Map_SrcCols(i - 1, j) = CStr(lo.Parent.Cells(lo.HeaderRowRange.Row + i - 2, lo.HeaderRowRange.Column + 6 + j).Value)
+            Next
+        Next
+    Else
+        ReDim Map_SrcCols(1 To 1, 0 To 0)
+    End If
+
+    Map_ExpandByTableName = GetExpandByTableName(lo.Parent)
+    ReadMappingFromTableName = True
     Exit Function
 FAIL:
     ReadMappingFromTableName = False
 End Function
 
-Public Function ReadMappingFromTable(mapTbl As ListObject) As Boolean
-    On Error GoTo FAIL
-    Dim lastRow As Long, lastCol As Long
-    Dim r As Long, c As Long, tCount As Long
-    Dim hdr As Range, body As Range
-    Set hdr = mapTbl.HeaderRowRange
-    Set body = mapTbl.DataBodyRange
-    If body Is Nothing Then GoTo FAIL
-    
-    lastRow = body.Rows.Count
-    lastCol = mapTbl.Range.Columns.Count  ' テーブル全体の列数
-    
-    ' 列割当（A:No, B:出力, C:型, D:ロジック, E:キー, F:モード, G:定義, H〜：テーブル群）
-    Const colNo& = 1, colOut& = 2, colType& = 3, colLogic& = 4, colKey& = 5, colMode& = 6, colDef& = 7
-    Dim firstTableCol&: firstTableCol = 8
-    
-    ReDim m_outCols(1 To lastRow)
-    ReDim m_dataType(1 To lastRow)
-    ReDim m_logic(1 To lastRow)
-    ReDim m_isKey(1 To lastRow)
-    ReDim m_mode(1 To lastRow)
-    ReDim m_def(1 To lastRow)
-    
-    For r = 1 To lastRow
-        m_outCols(r)  = CStr(body.Cells(r, colOut).Value)
-        m_dataType(r) = UCase$(Trim$(CStr(body.Cells(r, colType).Value)))
-        m_logic(r)    = CStr(body.Cells(r, colLogic).Value)
-        m_isKey(r)    = (CStr(body.Cells(r, colKey).Value) = "○")
-        m_mode(r)     = UCase$(Trim$(CStr(body.Cells(r, colMode).Value)))
-        If Len(m_mode(r)) = 0 Then m_mode(r) = "VALUE"
-        m_def(r)      = CStr(body.Cells(r, colDef).Value)
-    Next r
-    
-    If lastCol >= firstTableCol Then
-        tCount = lastCol - firstTableCol + 1
-        ReDim m_tblNames(0 To tCount - 1)
-        For c = firstTableCol To lastCol
-            m_tblNames(c - firstTableCol) = CStr(hdr.Cells(1, c).Value)
-        Next c
-        
-        ReDim m_srcCols(1 To lastRow, 0 To tCount - 1)
-        For r = 1 To lastRow
-            For c = 0 To tCount - 1
-                m_srcCols(r, c) = CStr(body.Cells(r, firstTableCol + c).Value)
-            Next c
-        Next r
-    Else
-        ReDim m_tblNames(0 To -1)
-        ReDim m_srcCols(1 To 1, 0 To 0)
-    End If
-    
-    ReadMappingFromTable = True
-    Exit Function
-FAIL:
-    ReadMappingFromTable = False
-End Function
-
-'=== テーブル配列のヘッダから列番号を取得 ===
-Public Function FindColumnIndex(arr As Variant, colName As String) As Long
-    Dim c As Long
-    For c = 1 To UBound(arr, 2)
-        If CStr(arr(1, c)) = colName Then FindColumnIndex = c: Exit Function
+Private Function GetExpandByTableName(ws As Worksheet) As String
+    On Error GoTo NF
+    Dim nm As Name
+    For Each nm In ws.Names
+        If LCase$(nm.Name) Like "*expandbytable" Then
+            GetExpandByTableName = CStr(nm.RefersToRange.Value)
+            Exit Function
+        End If
     Next
-    FindColumnIndex = 0
+NF:
+    GetExpandByTableName = ""
 End Function
 
-'=== テーブル名配列からインデックス ===
-Public Function IndexOfTable(tblNames() As String, name As String) As Long
-    Dim i As Long
-    For i = LBound(tblNames) To UBound(tblNames)
-        If tblNames(i) = name Then IndexOfTable = i: Exit Function
-    Next
-    IndexOfTable = -1
-End Function
-
-'=== 1行から複合キー文字列を生成 ===
-Public Function BuildKeyFromRow(arr As Variant, rowIdx As Long, keyColIdx() As Long) As String
-    Dim i As Long, s As String: s = ""
-    If Not Not keyColIdx Then
-        For i = LBound(keyColIdx) To UBound(keyColIdx)
-            If keyColIdx(i) > 0 Then s = s & "|" & CStr(arr(rowIdx, keyColIdx(i)))
-        Next
-    End If
-    If Len(s) > 0 Then s = Mid$(s, 2)
-    BuildKeyFromRow = s
+'==============================
+' Mappingに記載されたテーブル名配列を返す
+'==============================
+Public Function GetMappingTableNames() As String()
+    GetMappingTableNames = Map_TblNames
 End Function
