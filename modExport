@@ -1,37 +1,55 @@
 Option Explicit
 
-'==============================
-' Export：Masterの現在値を CSV 出力
-'==============================
+'======================================================
+' Export：Master内容をCSV出力（命名規則：状態 + B3 + 時刻）
+'======================================================
+
+Public Function GetMasterIdFromB3() As String
+    Dim lo As ListObject, ws As Worksheet
+    Set lo = GetTableByName(CurrentMasterTableName)
+    If lo Is Nothing Then GetMasterIdFromB3 = "": Exit Function
+    Set ws = lo.Parent
+    GetMasterIdFromB3 = CStr(ws.Range("B3").Value)
+End Function
+
 Public Sub ExportCSV()
     On Error GoTo EH
-    Dim tStart As Date: tStart = Now
-    If Len(CurrentMasterTableName) = 0 Then UsePipelineMain
-
-    Dim basePath As String: basePath = ThisWorkbook.Path
-    Dim exportPath As String: exportPath = basePath & "\" & EXPORT_FOLDER & "\"
-    EnsureFolder exportPath
-    EnsureFolder basePath & "\" & LOG_FOLDER & "\"
-
-    Dim lo As ListObject: Set lo = ThisWorkbook.ListObjects(CurrentMasterTableName)
-    If lo Is Nothing Or lo.DataBodyRange Is Nothing Then
+    Dim masterTbl As ListObject
+    Set masterTbl = GetTableByName(CurrentMasterTableName)
+    If masterTbl Is Nothing Then
+        MsgBox "Masterテーブル '" & CurrentMasterTableName & "' が見つかりません。", vbCritical
+        Exit Sub
+    End If
+    If masterTbl.DataBodyRange Is Nothing Then
         MsgBox "出力対象のデータがありません。", vbExclamation
         Exit Sub
     End If
 
-    Dim autoName As String
+    Dim basePath As String, exportPath As String
+    basePath = ThisWorkbook.Path
+    exportPath = basePath & "\" & EXPORT_FOLDER & "\"
+    EnsureFolder exportPath
+    EnsureFolder basePath & "\" & LOG_FOLDER & "\"
+
+    ' --- ファイル名の決定：状態 + inventory + B3 + yyyymmddhhss ---
+    Dim invId As String, statePrefix As String, autoName As String
+    invId = GetMasterIdFromB3()
+    If Len(invId) = 0 Then invId = "noid"
+
     If IsProcessed Then
-        autoName = CurrentExportPrefix & "export_processed_" & TimeStamp() & ".csv"
+        statePrefix = "proc_"
+    ElseIf HasRaw Then
+        statePrefix = "raw_"
     Else
-        autoName = CurrentExportPrefix & "export_raw_" & TimeStamp() & ".csv"
+        statePrefix = "hd_"
     End If
 
-    Dim csv As String: csv = BuildCsvTextFromRange(lo)
-    WriteTextFile exportPath & autoName, csv, CurrentEncodingMode
+    autoName = statePrefix & "inventory_" & invId & "_" & TimeStamp_YYMMDDHHSS() & ".csv"
 
-    WriteLog "INFO", "ExportCSV: " & exportPath & autoName & " / Encoding=" & CurrentEncodingMode & _
-                     " / rows=" & lo.DataBodyRange.Rows.Count & " / elapsed=" & Format(Now - tStart, "hh:nn:ss")
-    MsgBox "CSV出力しました：" & exportPath & autoName, vbInformation
+    ' --- 書き出し ---
+    WriteRangeAsCsvWithEncoding masterTbl, exportPath & autoName, CurrentEncodingMode
+    WriteLog "INFO", "ExportCSV: " & exportPath & autoName & " / Encoding=" & CurrentEncodingMode & " / rows=" & masterTbl.DataBodyRange.Rows.Count
+    MsgBox "CSV出力しました: " & exportPath & autoName, vbInformation
     Exit Sub
 EH:
     WriteLog "ERROR", "ExportCSV error: " & Err.Number & " " & Err.Description
