@@ -1,90 +1,93 @@
 Option Explicit
 
-'==============================
-' Mapping キャッシュ（他モジュールから参照するため Public）
-'==============================
-Public Map_OutCols()  As String  ' A: 出力カラム名
-Public Map_DataType() As String  ' B: データ型（TEXT/NUMBER/DATE）
-Public Map_Logic()    As String  ' C: 置換（"a→b;..."）※完全一致のみ
-Public Map_IsKey()    As Boolean ' D: キー（○）
-Public Map_Mode()     As String  ' E: モード（VALUE/CONCAT/EXPR）
-Public Map_Def()      As String  ' F: 定義（CONCAT列挙 or EXPR式/テンプレ）
+'======================================================
+' Mappingテーブル取得 / 読み取り
+'======================================================
 
-' G列以降（1行目：テーブル名） / 行=出力列, 列=テーブル：元カラム
-Public Map_TblNames() As String
-Public Map_SrcCols    As Variant
+'--- テーブル名から ListObject を取得（同名シート優先→全シート検索） ---
+Public Function GetTableByName(tblName As String) As ListObject
+    Dim ws As Worksheet, lo As ListObject
+    On Error Resume Next
+    Set lo = ThisWorkbook.Sheets(tblName).ListObjects(tblName)
+    On Error GoTo 0
+    If Not lo Is Nothing Then
+        Set GetTableByName = lo
+        Exit Function
+    End If
+    For Each ws In ThisWorkbook.Worksheets
+        For Each lo In ws.ListObjects
+            If StrComp(lo.Name, tblName, vbTextCompare) = 0 Then
+                Set GetTableByName = lo
+                Exit Function
+            End If
+        Next lo
+    Next ws
+End Function
 
-' 1:N 展開の対象子テーブル（同シートの名前付き範囲 ExpandByTable）
-Public Map_ExpandByTableName As String
-
-'==============================
-' Mapping 読み込み（ListObject名で）
-'==============================
-Public Function ReadMappingFromTableName(mappingLoName As String) As Boolean
+'--- Mappingテーブルを読み→グローバルキャッシュへ展開 ---
+Public Function ReadMappingFromTableName(mappingTblName As String) As Boolean
     On Error GoTo FAIL
-    Dim lo As ListObject: Set lo = ThisWorkbook.ListObjects(mappingLoName)
-    Dim lastRow As Long, lastCol As Long
-    lastRow = lo.DataBodyRange.Rows.Count + 1 ' +ヘッダ
-    lastCol = lo.HeaderRowRange.Columns.Count
-    If lastRow < 2 Or lastCol < 5 Then GoTo FAIL
+    Dim mapTbl As ListObject, lastRow As Long, lastCol As Long
+    Set mapTbl = GetTableByName(mappingTblName)
+    If mapTbl Is Nothing Then
+        MsgBox "Mappingテーブル '" & mappingTblName & "' が見つかりません。", vbCritical
+        ReadMappingFromTableName = False
+        Exit Function
+    End If
 
-    Dim i As Long, j As Long, tCount As Long
-    ReDim Map_OutCols(1 To lastRow - 1)
-    ReDim Map_DataType(1 To lastRow - 1)
-    ReDim Map_Logic(1 To lastRow - 1)
-    ReDim Map_IsKey(1 To lastRow - 1)
-    ReDim Map_Mode(1 To lastRow - 1)
-    ReDim Map_Def(1 To lastRow - 1)
+    Dim hdr As Range, body As Range
+    Set hdr = mapTbl.HeaderRowRange
+    Set body = mapTbl.DataBodyRange
+    If body Is Nothing Then
+        ReadMappingFromTableName = False
+        Exit Function
+    End If
 
-    For i = 2 To lastRow
-        Map_OutCols(i - 1)  = CStr(lo.Parent.Cells(lo.HeaderRowRange.Row + i - 2, lo.HeaderRowRange.Column + 0).Value)
-        Map_DataType(i - 1) = UCase$(Trim$(CStr(lo.Parent.Cells(lo.HeaderRowRange.Row + i - 2, lo.HeaderRowRange.Column + 1).Value)))
-        Map_Logic(i - 1)    = CStr(lo.Parent.Cells(lo.HeaderRowRange.Row + i - 2, lo.HeaderRowRange.Column + 2).Value)
-        Map_IsKey(i - 1)    = (CStr(lo.Parent.Cells(lo.HeaderRowRange.Row + i - 2, lo.HeaderRowRange.Column + 3).Value) = "○")
-        Map_Mode(i - 1)     = UCase$(Trim$(CStr(lo.Parent.Cells(lo.HeaderRowRange.Row + i - 2, lo.HeaderRowRange.Column + 4).Value)))
-        If Len(Map_Mode(i - 1)) = 0 Then Map_Mode(i - 1) = "VALUE"
-        Map_Def(i - 1)      = CStr(lo.Parent.Cells(lo.HeaderRowRange.Row + i - 2, lo.HeaderRowRange.Column + 5).Value)
-    Next
+    Dim rCount As Long, cCount As Long
+    rCount = body.Rows.Count
+    cCount = hdr.Columns.Count
 
-    tCount = Application.Max(0, lastCol - 6)
-    ReDim Map_TblNames(0 To IIf(tCount > 0, tCount - 1, 0))
+    ' A〜G（固定7列）を読む
+    ReDim Map_OutCols(1 To rCount)
+    ReDim Map_DataType(1 To rCount)
+    ReDim Map_Logic(1 To rCount)
+    ReDim Map_IsKey(1 To rCount)
+    ReDim Map_Mode(1 To rCount)
+    ReDim Map_Def(1 To rCount)
+
+    Dim r As Long, c As Long
+    For r = 1 To rCount
+        Map_OutCols(r)  = CStr(body.Cells(r, 2).Value) ' B: 出力カラム名
+        Map_DataType(r) = UCase$(Trim$(CStr(body.Cells(r, 3).Value))) ' C: 型
+        Map_Logic(r)    = CStr(body.Cells(r, 4).Value) ' D: ロジック
+        Map_IsKey(r)    = (CStr(body.Cells(r, 5).Value) = "○") ' E: キー
+        Map_Mode(r)     = UCase$(Trim$(CStr(body.Cells(r, 6).Value))) ' F: モード
+        If Len(Map_Mode(r)) = 0 Then Map_Mode(r) = "VALUE"
+        Map_Def(r)      = CStr(body.Cells(r, 7).Value) ' G: 定義
+    Next r
+
+    ' H以降：テーブル名（1行目ヘッダ）を取り、各行の対応カラム名を読む
+    Dim tCount As Long
+    tCount = Application.Max(0, cCount - 7)
     If tCount > 0 Then
-        For j = 7 To (6 + tCount)
-            Map_TblNames(j - 7) = CStr(lo.Parent.Cells(lo.HeaderRowRange.Row, lo.HeaderRowRange.Column + j - 1).Value)
-        Next
-        ReDim Map_SrcCols(1 To lastRow - 1, 0 To tCount - 1)
-        For i = 2 To lastRow
-            For j = 0 To tCount - 1
-                Map_SrcCols(i - 1, j) = CStr(lo.Parent.Cells(lo.HeaderRowRange.Row + i - 2, lo.HeaderRowRange.Column + 6 + j).Value)
-            Next
-        Next
+        ReDim Map_TblNames(0 To tCount - 1)
+        For c = 8 To 7 + tCount
+            Map_TblNames(c - 8) = CStr(hdr.Cells(1, c).Value)
+        Next c
+
+        ReDim Map_SrcCols(1 To rCount, 0 To tCount - 1)
+        For r = 1 To rCount
+            For c = 0 To tCount - 1
+                Map_SrcCols(r, c) = CStr(body.Cells(r, 8 + c).Value)
+            Next c
+        Next r
     Else
+        ReDim Map_TblNames(0 To -1) ' 空
         ReDim Map_SrcCols(1 To 1, 0 To 0)
     End If
 
-    Map_ExpandByTableName = GetExpandByTableName(lo.Parent)
     ReadMappingFromTableName = True
     Exit Function
 FAIL:
     ReadMappingFromTableName = False
-End Function
-
-Private Function GetExpandByTableName(ws As Worksheet) As String
-    On Error GoTo NF
-    Dim nm As Name
-    For Each nm In ws.Names
-        If LCase$(nm.Name) Like "*expandbytable" Then
-            GetExpandByTableName = CStr(nm.RefersToRange.Value)
-            Exit Function
-        End If
-    Next
-NF:
-    GetExpandByTableName = ""
-End Function
-
-'==============================
-' Mappingに記載されたテーブル名配列を返す
-'==============================
-Public Function GetMappingTableNames() As String()
-    GetMappingTableNames = Map_TblNames
 End Function
