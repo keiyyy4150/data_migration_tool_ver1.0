@@ -1,14 +1,44 @@
 Option Explicit
 
-'==============================
-' テキスト読み込み（ADODB.Stream）＋簡易自動判定
-'==============================
+'======================================================
+' IO系：フォルダ作成、CSV読み書き、文字コード判定
+'======================================================
+
+Public Sub EnsureFolder(pathWithSlash As String)
+    If Len(Dir(pathWithSlash, vbDirectory)) = 0 Then MkDir pathWithSlash
+End Sub
+
+'--- テキスト書き込み（ADODB.Streamを使ってエンコード出力） ---
+Public Sub WriteTextFile(filePath As String, ByVal content As String, encMode As String)
+    Dim stm As Object ' ADODB.Stream
+    Dim mode As String
+    mode = UCase$(encMode)
+    If mode = "AUTO" Then mode = "UTF-8" ' AUTO時の出力はUTF-8（BOM）とする
+
+    Set stm = CreateObject("ADODB.Stream")
+    stm.Type = 2 ' text
+    Select Case mode
+        Case "UTF-8":     stm.Charset = "utf-8"
+        Case "UTF-16LE":  stm.Charset = "unicode"
+        Case "SHIFT_JIS": stm.Charset = "shift_jis"
+        Case Else:        stm.Charset = "utf-8"
+    End Select
+    stm.Open
+    stm.WriteText content
+    stm.SaveToFile filePath, 2
+    stm.Close
+    Set stm = Nothing
+End Sub
+
+'--- テキスト読み込み（BOMで簡易判定→ADODB.Stream読込） ---
 Public Function ReadTextFile(filePath As String, encMode As String) As String
-    Dim mode As String: mode = UCase$(encMode)
+    Dim mode As String
+    mode = UCase$(encMode)
     If mode = "AUTO" Then mode = DetectEncoding(filePath)
 
-    Dim stm As Object: Set stm = CreateObject("ADODB.Stream")
-    stm.Type = 2 ' text
+    Dim stm As Object
+    Set stm = CreateObject("ADODB.Stream")
+    stm.Type = 2
     Select Case mode
         Case "UTF-8":     stm.Charset = "utf-8"
         Case "UTF-16LE":  stm.Charset = "unicode"
@@ -19,8 +49,10 @@ Public Function ReadTextFile(filePath As String, encMode As String) As String
     stm.LoadFromFile filePath
     ReadTextFile = stm.ReadText(-1)
     stm.Close
+    Set stm = Nothing
 End Function
 
+'--- BOMでざっくり判定（足りない場合は適宜拡張） ---
 Public Function DetectEncoding(filePath As String) As String
     Dim f As Integer, b1 As Byte, b2 As Byte, b3 As Byte
     On Error GoTo FAIL
@@ -40,36 +72,7 @@ FAIL:
     If Len(DetectEncoding) = 0 Then DetectEncoding = "SHIFT_JIS"
 End Function
 
-'==============================
-' テキスト書き出し（ADODB.Stream）
-'==============================
-Public Sub WriteTextFile(filePath As String, ByVal content As String, encMode As String)
-    Dim mode As String: mode = UCase$(encMode)
-    If mode = "AUTO" Then mode = "UTF-8" ' AUTO時はUTF-8(BOM)
-
-    Dim stm As Object: Set stm = CreateObject("ADODB.Stream")
-    stm.Type = 2
-    Select Case mode
-        Case "UTF-8":     stm.Charset = "utf-8"
-        Case "UTF-16LE":  stm.Charset = "unicode"
-        Case "SHIFT_JIS": stm.Charset = "shift_jis"
-        Case Else:        stm.Charset = "utf-8"
-    End Select
-    stm.Open
-    stm.WriteText content
-    stm.SaveToFile filePath, 2 ' adSaveCreateOverWrite
-    stm.Close
-End Sub
-
-'==============================
-' CSV パース（RFC4180簡易）・生成
-'==============================
-Public Function ParseCsvFile(filePath As String) As Variant
-    Dim text As String
-    text = ReadTextFile(filePath, CurrentEncodingMode)
-    ParseCsvFile = ParseCsvText(text)
-End Function
-
+'--- CSVテキスト→2次元配列（RFC4180簡易・改行/引用符対応） ---
 Public Function ParseCsvText(ByVal txt As String) As Variant
     Dim i As Long, ch As String * 1
     Dim inQuote As Boolean
@@ -106,7 +109,7 @@ Public Function ParseCsvText(ByVal txt As String) As Variant
     Dim maxCol As Long, r As Long
     For r = 1 To rows.Count
         If rows(r).Count > maxCol Then maxCol = rows(r).Count
-    Next
+    Next r
 
     Dim result() As Variant, rr As Long, cc As Long
     If rows.Count = 0 Then
@@ -116,18 +119,33 @@ Public Function ParseCsvText(ByVal txt As String) As Variant
 
     ReDim result(1 To rows.Count, 1 To maxCol)
     For rr = 1 To rows.Count
-        For cc = 1 To rows(rr).Count: result(rr, cc) = rows(rr)(cc): Next
-        For cc = rows(rr).Count + 1 To maxCol: result(rr, cc) = "": Next
-    Next
+        For cc = 1 To rows(rr).Count
+            result(rr, cc) = rows(rr)(cc)
+        Next cc
+        For cc = rows(rr).Count + 1 To maxCol
+            result(rr, cc) = ""
+        Next cc
+    Next rr
     ParseCsvText = result
 End Function
 
-Public Function BuildCsvTextFromRange(lo As ListObject) As String
+'--- CSVファイルを読み→配列化（エンコード考慮） ---
+Public Function ParseCsvFile(filePath As String) As Variant
+    Dim text As String
+    text = ReadTextFile(filePath, CurrentEncodingMode)
+    ParseCsvFile = ParseCsvText(text)
+End Function
+
+'--- Range（テーブル本体）をCSVで書き出す（改行/引用符対応＋エンコード） ---
+Public Sub WriteRangeAsCsvWithEncoding(lo As ListObject, filePath As String, encMode As String)
     Dim arr As Variant, rows As Long, cols As Long
-    Dim sb As String, r As Long, c As Long
+    Dim sb As String
+    Dim r As Long, c As Long
+
     arr = lo.DataBodyRange.Value
     rows = UBound(arr, 1): cols = UBound(arr, 2)
 
+    sb = ""
     For r = 1 To rows
         Dim line As String: line = ""
         For c = 1 To cols
@@ -137,61 +155,9 @@ Public Function BuildCsvTextFromRange(lo As ListObject) As String
                 cell = """" & cell & """"
             End If
             line = line & cell & IIf(c < cols, ",", "")
-        Next
+        Next c
         sb = sb & line & vbCrLf
-    Next
-    BuildCsvTextFromRange = sb
-End Function
+    Next r
 
-'==============================
-' importFiles から必要CSVを一括読込
-'==============================
-Public Function LoadAllCsv(importPath As String, _
-                           tblNames() As String, _
-                           ByRef dict As Object) As Boolean
-    Dim i As Long, filePath As String, extra As String
-
-    If (Not Not tblNames) = 0 Then
-        If Dir(importPath, vbDirectory) = "" Then
-            MsgBox "入力フォルダが存在しません：" & importPath, vbCritical
-            LoadAllCsv = False: Exit Function
-        End If
-        LoadAllCsv = True: Exit Function
-    End If
-
-    ' 必須ファイル存在チェック
-    For i = LBound(tblNames) To UBound(tblNames)
-        filePath = importPath & tblNames(i) & ".csv"
-        If Dir(filePath) = "" Then
-            MsgBox "必要ファイルが不足しています：" & vbCrLf & filePath, vbCritical
-            LoadAllCsv = False: Exit Function
-        End If
-    Next
-
-    ' 余分CSVの警告（続行）
-    Dim fn As String, isListed As Boolean
-    fn = Dir(importPath & "*.csv")
-    Do While Len(fn) > 0
-        isListed = False
-        For i = LBound(tblNames) To UBound(tblNames)
-            If LCase$(fn) = LCase$(tblNames(i) & ".csv") Then isListed = True: Exit For
-        Next
-        If Not isListed Then
-            extra = extra & IIf(Len(extra) > 0, vbCrLf, "") & (importPath & fn)
-        End If
-        fn = Dir
-    Loop
-    If Len(extra) > 0 Then
-        WriteLog "WARN", "Extra CSV exists (ignored):" & vbCrLf & extra
-        MsgBox "定義外のCSVがフォルダにあります（処理は続行します）：" & vbCrLf & extra, vbExclamation
-    End If
-
-    ' 実読込
-    For i = LBound(tblNames) To UBound(tblNames)
-        filePath = importPath & tblNames(i) & ".csv"
-        dict(tblNames(i)) = ParseCsvFile(filePath)
-        WriteLog "INFO", "Loaded: " & filePath & " / rows=" & UBound(dict(tblNames(i)), 1)
-    Next
-
-    LoadAllCsv = True
-End Function
+    WriteTextFile filePath, sb, encMode
+End Sub
