@@ -14,33 +14,80 @@ Public Join_OverrideRow As Long         ' 子行の行Idx（2〜）
 '==============================
 ' キー索引（1:1用）作成
 '==============================
+'------------------------------------------------------------
+' 各テーブルについて、
+'   「複合キー文字列 ＝ 行番号」を引ける辞書を作成し、
+' 引数 outDict に格納する。
+'
+' ・Map_TblNames(...) : マッピングの1行目(H列以降)に並ぶ「テーブル名」の配列
+' ・Map_IsKey(...)    : マッピングの「キー（○）」列（E列）を配列化したもの
+' ・Map_SrcCols(row, t) : マッピング行(row=出力列) × テーブル列(t=H以降何列目か)に
+'                         書かれた「そのテーブルでの元カラム名」
+' ・TableData(tableName) : CSVを読みこんだ2次元配列（1行目はヘッダ）
+'
+' できあがる outDict はこんな構造：
+'   outDict("TableA") = (Dictionary)  ' キー文字列 -> 行番号
+'   outDict("TableB") = (Dictionary)
+'------------------------------------------------------------
 Public Sub BuildKeyIndexes(ByRef outDict As Object)
     Dim t As Long, i As Long
-    Dim arr As Variant, keymap As Object
+    Dim arr As Variant
+    Dim keymap As Object  ' 1テーブル分の「キー→行番号」辞書
+
+    ' Map_TblNames が空（=VALUE列が無い等）の場合は何もしない
     If (Not Not Map_TblNames) = 0 Then Exit Sub
 
+    ' --- テーブルごとに処理 ---
     For t = LBound(Map_TblNames) To UBound(Map_TblNames)
+
+        ' 新しい辞書を作る（このテーブル専用のインデックス）
         Set keymap = CreateObject("Scripting.Dictionary")
+
+        ' このテーブル名に対応する配列（CSV全体）を取り出す
+        ' 先頭行はヘッダ、2行目以降がデータ
         arr = TableData(Map_TblNames(t))
-        Dim keyColIdx() As Long, kc As Long: kc = 0
+
+        ' ① このテーブルで使用する「キー列の列番号」を集める
+        '    （Mappingの E列=○ かつ H以降のこのテーブル列に元カラム名が書いてある行）
+        Dim keyColIdx() As Long ' 複合キーを構成する「実際の列番号」の配列
+        Dim kc As Long: kc = 0
         For i = LBound(Map_IsKey) To UBound(Map_IsKey)
-            If Map_IsKey(i) Then
+            If Map_IsKey(i) Then                           ' この出力列はキーとして使う？
+                ' この出力列に、このテーブル用の元カラム名が指定されている？
                 If UBound(Map_SrcCols, 2) >= t Then
                     If Len(Map_SrcCols(i, t)) > 0 Then
+                        ' ヘッダ行から「その元カラム名が何列目か」を探す
                         kc = kc + 1
                         ReDim Preserve keyColIdx(1 To kc)
                         keyColIdx(kc) = FindColumnIndex(arr, Map_SrcCols(i, t))
+                        ' 例）"product_id" がヘッダの何列目か → 3列目 など
                     End If
                 End If
             End If
         Next
+
+        ' ② キー列が1つ以上見つかった場合のみ、辞書を作る
         If kc > 0 Then
             Dim r As Long, keyStr As String
+
+            ' 配列の2行目以降はデータ。各行のキー値から「複合キー文字列」を作る
             For r = 2 To UBound(arr, 1)
+
+                ' BuildKeyFromRow は、keyColIdx に並んだ列番号の値を
+                ' 例：「値1|値2|値3」のように '|' で結合して返す関数
                 keyStr = BuildKeyFromRow(arr, r, keyColIdx)
-                If Len(keyStr) > 0 Then If Not keymap.Exists(keyStr) Then keymap.Add keyStr, r
+
+                ' 空じゃなければ辞書に追加（重複キーは最初の行だけ活かす仕様）
+                If Len(keyStr) > 0 Then
+                    If Not keymap.Exists(keyStr) Then
+                        keymap.Add keyStr, r   ' 例）"123|A" → 5（5行目）
+                    End If
+                End If
             Next
         End If
+
+        ' ③ できあがった辞書を outDict に格納
+        '    こうしておくことで、後で outDict("Table名")(キー文字列) で行番号がすぐ引ける
         outDict(Map_TblNames(t)) = keymap
     Next
 End Sub
