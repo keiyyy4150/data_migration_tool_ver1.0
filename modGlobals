@@ -51,3 +51,28 @@ Public m_baseRowIdx() As Long         ' 出力行 → ベース行 index（2〜�
 Public Function TimeStamp() As String
     TimeStamp = Format(Now, "yyyymmdd_hhnnss")
 End Function
+
+' Variant 変数に入っている配列が「割り当て済み」かどうか判定
+Public Function IsArrayInitialized(ByVal v As Variant) As Boolean
+    On Error GoTo EH
+    If IsArray(v) Then
+        ' 境界に触れてみる（未割り当てだとエラー）
+        Dim lb As Long
+        lb = LBound(v, 1)
+        IsArrayInitialized = True
+        Exit Function
+    End If
+EH:
+    IsArrayInitialized = False
+End Function
+
+' 型付き動的配列（例：Long()）が「割り当て済み」か判定
+Public Function IsAllocated_Long(ByRef arr() As Long) As Boolean
+    On Error GoTo EH
+    Dim lb As Long
+    lb = LBound(arr, 1)   ' 未割り当てだとここでエラー
+    IsAllocated_Long = True
+    Exit Function
+EH:
+    IsAllocated_Long = False
+End Function
