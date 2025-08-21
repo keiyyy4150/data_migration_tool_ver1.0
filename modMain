@@ -4,7 +4,7 @@ Option Explicit
 Public Sub SetupShortcuts()
     Application.OnKey "^+I", "ImportFiles"   ' Ctrl+Shift+I
     Application.OnKey "^+P", "ProcessData"   ' Ctrl+Shift+P
-    Application.OnKey "^+C", "ClearData"     ' Ctrl+Shift+C
+    Application.OnKey "^+D", "ClearData"     ' Ctrl+Shift+C
     Application.OnKey "^+E", "ExportCSV"     ' Ctrl+Shift+E
 End Sub
 
