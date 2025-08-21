@@ -173,3 +173,17 @@ BAD_ARRAY:
     KeyIndexSingle(Map_TblNames(t)) = CreateObject("Scripting.Dictionary")
     KeyIndexMulti(Map_TblNames(t))  = CreateObject("Scripting.Dictionary")
 End Sub
+
+
+
+Public Function FindColumnIndex(arr As Variant, colName As String) As Long
+    Dim c As Long, target As String
+    target = Trim$(CStr(colName))
+    For c = 1 To UBound(arr, 2)
+        If Trim$(CStr(arr(1, c))) = target Then
+            FindColumnIndex = c
+            Exit Function
+        End If
+    Next
+    FindColumnIndex = 0
+End Function
