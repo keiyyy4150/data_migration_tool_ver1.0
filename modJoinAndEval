@@ -1,11 +1,46 @@
 Option Explicit
 
+'=== 文字列ユーティリティ（ヘッダ正規化） ===
+Private Function NormalizeHeader(ByVal s As String) As String
+    If Len(s) = 0 Then NormalizeHeader = "" : Exit Function
+    s = Replace$(s, ChrW(&HFEFF), "") ' BOM除去
+    s = Trim$(s)
+    NormalizeHeader = s
+End Function
+
+'=== 改行・| 区切りで複数列名を返す（空は除外） ===
+Private Function SafeGetSrcColNames(i As Long, tIdx As Long) As Collection
+    Dim col As New Collection
+    Dim raw As String: raw = SafeGetSrcColName(i, tIdx) ' 既存の単体取得
+    If Len(raw) = 0 Then Set SafeGetSrcColNames = col: Exit Function
+
+    Dim s As String
+    s = Replace$(raw, vbCrLf, vbLf)
+    s = Replace$(s, vbCr, vbLf)
+    s = Replace$(s, "|", vbLf) ' | も分割として許可
+    Dim arr() As String, k As Long, one As String
+    arr = Split(s, vbLf)
+    For k = LBound(arr) To UBound(arr)
+        one = NormalizeHeader(arr[k])
+        If Len(one) > 0 Then col.Add one
+    Next
+    Set SafeGetSrcColNames = col
+End Function
+
+
 '=== 列名→列番号（見出し=1行目）
+Private Function Norm(ByVal s As String) As String
+    If Len(s) = 0 Then Norm = "" : Exit Function
+    s = Replace$(s, ChrW(&HFEFF), "") ' UTF-8 BOM
+    s = Trim$(s)
+    Norm = s
+End Function
+
 Public Function FindColumnIndex(arr As Variant, colName As String) As Long
     Dim c As Long, target As String
-    target = Trim$(CStr(colName))
+    target = Norm(colName)
     For c = 1 To UBound(arr, 2)
-        If Trim$(CStr(arr(1, c))) = target Then
+        If Norm(CStr(arr(1, c))) = target Then
             FindColumnIndex = c
             Exit Function
         End If
@@ -81,27 +116,33 @@ Public Function CollectKeyColIndexesForBase(baseArr As Variant, baseTbl As Strin
     kc = 0
     For i = LBound(Map_OutCols) To UBound(Map_OutCols)
         If Map_IsKey(i) Then
-            Dim nm As String
-            nm = SafeGetSrcColName(i, tIdx)
-            If Len(nm) > 0 Then kc = kc + 1
+            Dim names As Collection: Set names = SafeGetSrcColNames(i, tIdx)
+            If Not names Is Nothing Then If names.Count > 0 Then kc = kc + 1
         End If
     Next
     If kc = 0 Then CollectKeyColIndexesForBase = Array(): Exit Function
 
-    ' 実配列を作る
     Dim idx() As Long, cur As Long
     ReDim idx(1 To kc): cur = 0
 
     For i = LBound(Map_OutCols) To UBound(Map_OutCols)
         If Map_IsKey(i) Then
-            Dim colName As String
-            colName = SafeGetSrcColName(i, tIdx)
-            If Len(colName) > 0 Then
-                cur = cur + 1
-                If IsNumeric(colName) Then
-                    idx(cur) = CLng(colName) ' 数値は列番号として採用
-                Else
-                    idx(cur) = FindColumnIndex(baseArr, colName) ' 列名→列番号
+            Dim names As Collection: Set names = SafeGetSrcColNames(i, tIdx)
+            If Not names Is Nothing Then
+                Dim picked As Long: picked = 0
+                Dim j As Long, nm As String, ci As Long
+                For j = 1 To names.Count
+                    nm = names(j)
+                    If IsNumeric(nm) Then
+                        ci = CLng(nm)
+                    Else
+                        ci = FindColumnIndex(baseArr, nm)
+                    End If
+                    If ci > 0 Then picked = ci: Exit For
+                Next
+                If picked > 0 Then
+                    cur = cur + 1
+                    idx(cur) = picked
                 End If
             End If
         End If
@@ -215,26 +256,52 @@ End Function
 '==============================
 Public Function BuildValueModeRaw(colIndex As Long, baseTbl As String, baseRow As Long, myKey As String, _
                                   Optional matchIndex As Long = 1) As Variant
-    Dim t As Long, srcColName As String, srcColIndex As Long, v As Variant
+    Dim t As Long, v As Variant
     v = ""
     If (Not Not Map_TblNames) = 0 Then BuildValueModeRaw = v: Exit Function
 
+    Dim isValue As Boolean
+    isValue = (UCase$(Map_Mode(colIndex)) = "VALUE" Or Len(Map_Mode(colIndex)) = 0)
+
     For t = LBound(Map_TblNames) To UBound(Map_TblNames)
-        srcColName = SafeGetSrcColName(colIndex, t)
-        If Len(srcColName) > 0 Then
-            If Map_TblNames(t) = baseTbl Then
-                If IsNumeric(srcColName) Then
-                    srcColIndex = CLng(srcColName)
+        Dim names As Collection: Set names = SafeGetSrcColNames(colIndex, t)
+        If names Is Nothing Or names.Count = 0 Then GoTo CONT_T
+
+        If Map_TblNames(t) = baseTbl Then
+            Dim arr As Variant: arr = TableData(baseTbl)
+            Dim acc As String: acc = ""
+            Dim j As Long, one As String, ci As Long, valStr As String
+            For j = 1 To names.Count
+                one = names(j)
+                If IsNumeric(one) Then
+                    ci = CLng(one)
                 Else
-                    srcColIndex = FindColumnIndex(TableData(baseTbl), srcColName)
+                    ci = FindColumnIndex(arr, one)
                 End If
-                If srcColIndex > 0 Then v = TableData(baseTbl)(baseRow, srcColIndex)
-                Exit For
-            Else
-                v = GetValueFromTableMulti(Map_TblNames(t), srcColName, myKey, matchIndex)
-                If Len(CStr(v)) > 0 Then Exit For
-            End If
+                If ci > 0 Then
+                    valStr = CStr(arr(baseRow, ci))
+                    If isValue Then
+                        If Len(valStr) > 0 Then
+                            If Len(acc) = 0 Then acc = valStr Else acc = acc & vbLf & valStr
+                        End If
+                    Else
+                        v = valStr: Exit For
+                    End If
+                End If
+            Next
+            If isValue Then v = acc
+            If Len(CStr(v)) > 0 Then BuildValueModeRaw = v: Exit Function
+
+        Else
+            Dim j2 As Long, nm As String, got As String
+            For j2 = 1 To names.Count
+                nm = names(j2)
+                got = GetValueFromTableMulti(Map_TblNames(t), nm, myKey, matchIndex)
+                If Len(got) > 0 Then v = got: Exit For
+            Next
+            If Len(CStr(v)) > 0 Then BuildValueModeRaw = v: Exit Function
         End If
+CONT_T:
     Next
     BuildValueModeRaw = v
 End Function
