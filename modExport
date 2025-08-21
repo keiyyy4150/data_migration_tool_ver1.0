@@ -1,57 +1,79 @@
 Option Explicit
 
-'======================================================
-' Export：Master内容をCSV出力（命名規則：状態 + B3 + 時刻）
-'======================================================
-
-Public Function GetMasterIdFromB3() As String
-    Dim lo As ListObject, ws As Worksheet
-    Set lo = GetTableByName(CurrentMasterTableName)
-    If lo Is Nothing Then GetMasterIdFromB3 = "": Exit Function
-    Set ws = lo.Parent
-    GetMasterIdFromB3 = CStr(ws.Range("B3").Value)
-End Function
-
+'==============================
+' CSV 出力（Masterの現在値をそのまま）
+'   ファイル名規則：
+'    - IsProcessed=True         → "proc_＜Base＞_＜B3＞_TS.csv"
+'    - HasRaw=True(未加工)      → "raw_ ＜Base＞_＜B3＞_TS.csv"
+'    - それ以外（初期/手動編集）→ "hd_  ＜Base＞_＜B3＞_TS.csv"
+'==============================
 Public Sub ExportCSV()
     On Error GoTo EH
-    Dim masterTbl As ListObject
-    Set masterTbl = GetTableByName(CurrentMasterTableName)
-    If masterTbl Is Nothing Then
-        MsgBox "Masterテーブル '" & CurrentMasterTableName & "' が見つかりません。", vbCritical
+    Dim masterLo As ListObject
+    Set masterLo = GetListObjectByName(CurrentMasterTableName)
+    If masterLo Is Nothing Then
+        MsgBox "Masterテーブルが見つかりません: " & CurrentMasterTableName, vbCritical
         Exit Sub
     End If
-    If masterTbl.DataBodyRange Is Nothing Then
+    If masterLo.DataBodyRange Is Nothing Then
         MsgBox "出力対象のデータがありません。", vbExclamation
         Exit Sub
     End If
-
+    
     Dim basePath As String, exportPath As String
     basePath = ThisWorkbook.Path
     exportPath = basePath & "\" & EXPORT_FOLDER & "\"
     EnsureFolder exportPath
     EnsureFolder basePath & "\" & LOG_FOLDER & "\"
-
-    ' --- ファイル名の決定：状態 + inventory + B3 + yyyymmddhhss ---
-    Dim invId As String, statePrefix As String, autoName As String
-    invId = GetMasterIdFromB3()
-    If Len(invId) = 0 Then invId = "noid"
-
+    
+    ' 変換識別子：Masterのシートの B3 を使用
+    Dim ident As String
+    ident = CStr(masterLo.Parent.Range("B3").Value)
+    If Len(ident) = 0 Then ident = "NA"
+    
+    ' モード判定
+    Dim modePrefix As String
     If IsProcessed Then
-        statePrefix = "proc_"
+        modePrefix = "proc_"
     ElseIf HasRaw Then
-        statePrefix = "raw_"
+        modePrefix = "raw_"
     Else
-        statePrefix = "hd_"
+        modePrefix = "hd_"
     End If
-
-    autoName = statePrefix & "inventory_" & invId & "_" & TimeStamp_YYMMDDHHSS() & ".csv"
-
-    ' --- 書き出し ---
-    WriteRangeAsCsvWithEncoding masterTbl, exportPath & autoName, CurrentEncodingMode
-    WriteLog "INFO", "ExportCSV: " & exportPath & autoName & " / Encoding=" & CurrentEncodingMode & " / rows=" & masterTbl.DataBodyRange.Rows.Count
-    MsgBox "CSV出力しました: " & exportPath & autoName, vbInformation
+    
+    Dim fileName As String
+    fileName = modePrefix & CurrentExportBaseName & "_" & ident & "_" & TimeStamp() & ".csv"
+    
+    ' 書き出し
+    WriteRangeAsCsvWithEncoding masterLo, exportPath & fileName, CurrentEncodingMode
+    WriteLog "INFO", "ExportCSV: " & exportPath & fileName & " / Encoding=" & CurrentEncodingMode & " / rows=" & masterLo.DataBodyRange.Rows.Count
+    MsgBox "CSV出力しました：" & exportPath & fileName, vbInformation
     Exit Sub
 EH:
     WriteLog "ERROR", "ExportCSV error: " & Err.Number & " " & Err.Description
     MsgBox "ExportCSVでエラー: " & Err.Description, vbCritical
+End Sub
+
+'=== CSV書き出し（値→RFC4180, 引用/改行対応, エンコード） ===
+Public Sub WriteRangeAsCsvWithEncoding(lo As ListObject, filePath As String, encMode As String)
+    Dim arr As Variant, rows As Long, cols As Long
+    arr = lo.DataBodyRange.Value
+    rows = UBound(arr, 1): cols = UBound(arr, 2)
+    
+    Dim sb As String, r As Long, c As Long
+    For r = 1 To rows
+        Dim line As String: line = ""
+        For c = 1 To cols
+            Dim cell As String: cell = CStr(arr(r, c))
+            If InStr(cell, """") > 0 Then cell = Replace(cell, """", """""")
+            If InStr(cell, ",") > 0 Or InStr(cell, vbCr) > 0 Or InStr(cell, vbLf) > 0 Then
+                cell = """" & cell & """"
+            End If
+            If c > 1 Then line = line & ","
+            line = line & cell
+        Next
+        sb = sb & line & vbCrLf
+    Next
+    
+    WriteTextFile filePath, sb, encMode
 End Sub
