@@ -598,3 +598,4 @@ Private Sub ApplyOp(ByRef nums() As Double, ByRef nTop As Long, ByRef ops() As S
     End Select
     nTop = nTop + 1: ReDim Preserve nums(1 To nTop): nums(nTop) = res
 End Sub
+
