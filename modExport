@@ -10,6 +10,7 @@ Option Explicit
 Public Sub ExportCSV()
     On Error GoTo EH
     Dim masterLo As ListObject
+    If Len(CurrentMasterTableName) = 0 Then UsePipelineMain
     Set masterLo = GetListObjectByName(CurrentMasterTableName)
     If masterLo Is Nothing Then
         MsgBox "Masterテーブルが見つかりません: " & CurrentMasterTableName, vbCritical
@@ -46,7 +47,7 @@ Public Sub ExportCSV()
     
     ' 書き出し
     WriteRangeAsCsvWithEncoding masterLo, exportPath & fileName, CurrentEncodingMode
-    WriteLog "INFO", "ExportCSV: " & exportPath & fileName & " / Encoding=" & CurrentEncodingMode & " / rows=" & masterLo.DataBodyRange.Rows.Count
+    WriteLog "INFO", "ExportCSV: " & exportPath & fileName & " / Encoding=" & CurrentEncodingMode & " / rows=" & masterLo.DataBodyRange.rows.Count
     MsgBox "CSV出力しました：" & exportPath & fileName, vbInformation
     Exit Sub
 EH:
