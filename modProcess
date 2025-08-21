@@ -1,5 +1,23 @@
 Option Explicit
 
+'=== 既定行数にマスターの表サイズを戻す（B4セル：行数設定 / 空なら20000） ===
+Private Sub ResetMasterSize(masterLo As ListObject)
+    On Error Resume Next
+    If masterLo Is Nothing Then Exit Sub
+    Dim ws As Worksheet: Set ws = masterLo.Parent
+    Dim reserve As Long
+    reserve = CLng(Val(ws.Range("B4").Value)) ' 任意セルに既定行数を置く運用。空なら下で既定値に。
+    If reserve <= 0 Then reserve = 20000
+
+    Dim cols As Long: cols = masterLo.ListColumns.Count
+    Dim newRg As Range
+    Set newRg = masterLo.HeaderRowRange.Resize(reserve + 1, cols)
+    masterLo.Resize newRg
+    If Not masterLo.DataBodyRange Is Nothing Then masterLo.DataBodyRange.ClearContents
+    On Error GoTo 0
+End Sub
+
+
 '==============================
 ' パイプライン切替（Main / List）
 '==============================
@@ -84,11 +102,9 @@ Public Sub ImportFiles()
     WriteLog "INFO", "BaseTable=" & m_baseTblName
     
     WriteLog "INFO", "PickBaseTableName succeeded"
-       
-    ' ★★★★★★ここまでOK★★★★★★
      
     ' 無加工JOIN
-    RawJoined = BuildJoinedRaw(m_baseTblName) ' ★★★★★★ここでエラー★★★★★★
+    RawJoined = BuildJoinedRaw(m_baseTblName) '
     HasRaw = True: IsProcessed = False
     
     WriteLog "INFO", "RawJoined succeeded"
@@ -207,7 +223,8 @@ Public Sub ClearData()
     Set KeyIndexSingle = Nothing
     Set KeyIndexMulti = Nothing
 
-    WriteLog "INFO", "ClearData: Master cleared & memory freed"
+    If Not masterLo Is Nothing Then ResetMasterSize masterLo
+WriteLog "INFO", "ClearData: Master cleared & memory freed"
     MsgBox "初期化しました。", vbInformation
 End Sub
 
