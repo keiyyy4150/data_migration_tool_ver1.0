@@ -1,31 +1,127 @@
-Map_SrcCols(i, tIdx)　の箇所で「引数の型が一致しません」エラーが出ます。日本語で対処法教えてください。
- 
+「引数の型が一致しません（Type mismatch）」は、だいたい次のどれかが原因です。
+	1.	Map_SrcCols の次元や下限/上限が想定と違う
+　- 例：2次元（(行, テーブル列)）だと思っていたが、1次元だった／第2次元の下限が 0 なのに tIdx が 1 から始まっている 等
+	2.	tIdx が範囲外（IndexOfTable が -1 を返している、または 0/1 始まりのズレ）
+	3.	Map_SrcCols(i, tIdx) の中身が文字列以外（数値・Null・配列・オブジェクト・エラー値）で、Len() や FindColumnIndex() に渡したときに不整合になる
+	4.	Map_OutCols の添字範囲と Map_SrcCols の第1次元の範囲がズレている（i が Map_SrcCols の範囲外）
+
+⸻
+
+対処のコツ（堅牢化）
+
+A) 両次元の LBound/UBound を見てからアクセス
+
+tIdx も i も 上下限の両方をチェックします（上限だけ見ても下限がズレていれば落ちます）。
+
+B) 要素の型を確認 → 必要なら分岐/型変換
+	•	Null ならスキップ
+	•	数値なら列番号として扱う
+	•	文字列なら列名として FindColumnIndex に渡す
+	•	それ以外（配列/オブジェクト/エラー値）はスキップ
+
+C) IndexOfTable が -1 のときは即終了
+
+対象テーブル無し＝キー列無しとして空の配列を返す
+
+⸻
+
+改訂版コード（安全ガード入り）
+
 '=== ベーステーブルのキー列 index 一式 ===
 Public Function CollectKeyColIndexesForBase(baseArr As Variant, baseTbl As String) As Variant
     Dim tIdx As Long, i As Long, kc As Long
+    Dim lb1 As Long, ub1 As Long, lb2 As Long, ub2 As Long
+
     tIdx = IndexOfTable(Map_TblNames, baseTbl)
+    If tIdx < 0 Then
+        CollectKeyColIndexesForBase = Array()
+        Exit Function
+    End If
+
+    ' Map_SrcCols が 2次元配列であることを前提に境界を取得
+    On Error GoTo TypeErr
+    lb1 = LBound(Map_SrcCols, 1): ub1 = UBound(Map_SrcCols, 1)
+    lb2 = LBound(Map_SrcCols, 2): ub2 = UBound(Map_SrcCols, 2)
+    On Error GoTo 0
+
     kc = 0
     For i = LBound(Map_OutCols) To UBound(Map_OutCols)
         If Map_IsKey(i) Then
-            If (Not Not Map_TblNames) <> 0 And tIdx >= 0 Then
-                If UBound(Map_SrcCols, 2) >= tIdx Then
-                    If Len(Map_SrcCols(i, tIdx)) > 0 Then kc = kc + 1
+            ' 両次元の範囲チェック
+            If i >= lb1 And i <= ub1 And tIdx >= lb2 And tIdx <= ub2 Then
+                Dim v As Variant
+                v = Map_SrcCols(i, tIdx)
+
+                If Not IsNull(v) Then
+                    ' 文字列・数値の両対応。文字列長>0 か 数値>0 ならキーとしてカウント
+                    If (VarType(v) = vbString And Len$(v) > 0) _
+                    Or (IsNumeric(v) And CLng(v) > 0) Then
+                        kc = kc + 1
+                    End If
                 End If
             End If
         End If
     Next
-    If kc = 0 Then CollectKeyColIndexesForBase = Array(): Exit Function
+
+    If kc = 0 Then
+        CollectKeyColIndexesForBase = Array()
+        Exit Function
+    End If
+
     Dim idx() As Long, cur As Long
     ReDim idx(1 To kc): cur = 0
+
     For i = LBound(Map_OutCols) To UBound(Map_OutCols)
         If Map_IsKey(i) Then
-            If UBound(Map_SrcCols, 2) >= tIdx Then
-                If Len(Map_SrcCols(i, tIdx)) > 0 Then
-                    cur = cur + 1
-                    idx(cur) = FindColumnIndex(baseArr, Map_SrcCols(i, tIdx))  ' ★★★★★★ここでエラー★★★★★★
+            If i >= lb1 And i <= ub1 And tIdx >= lb2 And tIdx <= ub2 Then
+                Dim v2 As Variant
+                v2 = Map_SrcCols(i, tIdx)
+
+                If Not IsNull(v2) Then
+                    If IsNumeric(v2) Then
+                        ' 列番号として採用（1始まり想定。0始まりの場合は +1 等の調整）
+                        cur = cur + 1
+                        idx(cur) = CLng(v2)
+                    ElseIf VarType(v2) = vbString Then
+                        Dim s As String
+                        s = CStr(v2)
+                        If Len(s) > 0 Then
+                            cur = cur + 1
+                            idx(cur) = FindColumnIndex(baseArr, s)  ' 列名→列番号
+                        End If
+                    End If
                 End If
             End If
         End If
     Next
+
     CollectKeyColIndexesForBase = idx
+    Exit Function
+
+TypeErr:
+    ' Map_SrcCols が 2次元でない／配列でない など
+    CollectKeyColIndexesForBase = Array()
 End Function
+
+
+⸻
+
+追加チェックリスト
+	•	IndexOfTable(Map_TblNames, baseTbl) が返す添字は 0始まりか1始まりか
+→ Map_SrcCols 第2次元の下限（LBound(Map_SrcCols,2)） と揃えるか、ズレるなら tIdx = tIdx + 1 などで調整
+	•	Map_OutCols の添字範囲と Map_SrcCols 第1次元の範囲が一致しているか
+→ 合わないなら、i を直接使わず「出力列→マッピング列」の対照表を参照する形に
+	•	FindColumnIndex(baseArr, ...) の引数仕様
+	•	列名を渡す関数なら、数値（列番号）が来た場合はそのまま idx(cur) = CLng(v2) にする
+	•	列番号を渡す関数なら、文字列が来た場合は先に列番号に変換する
+	•	Map_SrcCols の中に Null/エラー値/配列 が混じっていないか
+→ 上のコードは弾きます
+
+⸻
+
+どう直すのが最短？
+	1.	まず停止時に Debug.Print LBound/UBound を出して、「i と tIdx が範囲内か」を確認
+	2.	止まる行で v = Map_SrcCols(i, tIdx) として VarType(v) をウォッチ
+	3.	VarType(v) が vbString でも Null でもない → その型に合わせて分岐（数値なら列番号扱い）
+
+以上で「型不一致」は解消できるはず。Map_SrcCols の実データ例（数件）を教えてもらえれば、よりピンポイントで最適化版に詰めます！
