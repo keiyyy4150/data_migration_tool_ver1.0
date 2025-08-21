@@ -1,38 +1,155 @@
-使い方（セットアップ）
-	1.	各シートにテーブルを作成
-	•	Mapping側：Mapping_Main, Mapping_List
-	•	ヘッダー：A:No / B:出力カラム / C:型 / D:ロジック / E:キー / F:モード / G:定義 / H以降=テーブル名
-	•	Master側：Master_Main, Master_List
-	•	見出しは Mapping の B列：出力カラム と同順で一致させる
-	2.	importFiles と exportFiles フォルダを Tool.xlsx と同階層に用意
-	3.	シート上のボタンにそれぞれ割り当て
-	•	「エンコード」→ Btn_ChooseEncoding
-	•	「ファイルインポート」→ Btn_Import
-	•	「データ加工」→ Btn_Process
-	•	「クリア」→ Btn_Clear
-	•	「CSV出力」→ Btn_Export
-	•	（Main/List切替ボタンを置くなら SetPipeline_Main / SetPipeline_List）
-	4.	CONCATの条件ブロックの記法（例）
-	•	[tbA.c1="01" & tbA.c2=1]→結果A
-	•	[tbA.c3^="令和7年"]→"R{tbA.c3}"
-	•	[tbD.c4="01" | tbD.c4="00"]→カラム4 | [tbE.c5="01" | tbE.c5="00"]→カラム5
+エラー箇所の
+
+keyColIdx(kc) = FindColumnIndex(arr, Map_SrcCols(i, t))
+
+で「型が一致しません（Type mismatch）」や「引数が一致しません」と出る場合、**ほぼ確実に arr が“2次元配列ではない”か、Map_SrcCols(i, t) が変な値（空、エラー値）**になっています。典型原因はこのあたりです👇
+
+よくある原因チェック
+	1.	Mapping のヘッダ（I1以降のテーブル名） ≠ CSVファイル名（拡張子除く）
+　例）Mapping では「在庫」なのに実ファイルが zaiko.csv。
+　→ LoadAllCsv は「I1以降に書いた全テーブル」を読み込みます。名前が1文字でも違うと TableData("在庫") が存在せず、arr が配列でなくなり得ます。
+	2.	キーに○が付いているのに、そのテーブル列が空欄
+　例）キー列行に○、でも I列（在庫）セルが空白。
+　→ その条件はスキップされる想定ですが、Mappingのずれで異常値が来ると失敗しやすいです。
+	3.	CSVの1行目（ヘッダー）が空/崩れている
+　→ FindColumnIndex は「配列の1行目をヘッダー」として探します。空だと見つからず、後続で混乱します。
+	4.	半角/全角・余分なスペース
+　例）"在庫id" と "在庫ID"、" product_id "（前後スペース）など。
+　→ Mapping の列名と CSV のヘッダーは完全一致が必要です（大文字小文字も一致前提）。
+	5.	Mapping テーブルの列数・空行
+　→ テーブル最終行に中途半端な「○だけ入った行」などがあると想定外になります。
 
 ⸻
 
-メモ（性能・拡張）
-	•	4,000件×2系でも配列/Dictionary処理なので実用十分。
-	•	必要なら、SafeEval を拡張（ROUND/IF/DATEDIFF など）可能。
-	•	条件式はRAW一致が基本。置換や型の影響を受けないため、安定して判定できます。　
+とりあえず落ちないようにする“堅牢化パッチ”
 
-モード選択の指針（まとめ）
-	•	VALUE
-	•	単純に1つの値を出す
-	•	ベース＞他テーブルの優先補完で取りたい
-	•	置換は列全体で同一ルールでよい
-	•	CONCAT
-	•	複数の値を改行でひとまとめにしたい
-	•	値ごとの複雑な条件分岐は不要（または空→スキップで良い）
-	•	EXPR
-	•	金額計算・件数計算などの四則演算が必要
-	•	「○○: {col}」のような文字列テンプレで整形したい
-あ
+modMappingHelper の BuildKeyIndexes を、安全確認＋ログを厚くした版に差し替えてください（下記丸ごと置換）。
+「配列か？」「元列名は空でないか？」「列が見つかったか？」を都度チェックし、問題があればログに警告を出してスキップします。
+
+'==============================
+' キー索引（Single: 1件、Multi: 複数行）堅牢版
+'==============================
+Public Sub BuildKeyIndexes()
+    Set KeyIndexSingle = CreateObject("Scripting.Dictionary")
+    Set KeyIndexMulti  = CreateObject("Scripting.Dictionary")
+    
+    Dim t As Long
+    If (Not Not Map_TblNames) = 0 Then Exit Sub
+    
+    For t = LBound(Map_TblNames) To UBound(Map_TblNames)
+        Dim tblName As String: tblName = Map_TblNames(t)
+        Dim arr As Variant
+        
+        ' 1) テーブルが読み込まれているか？
+        If Not TableData.Exists(tblName) Then
+            WriteLog "ERROR", "BuildKeyIndexes: table not loaded: " & tblName
+            ' 空の辞書でも入れておく
+            KeyIndexSingle(tblName) = CreateObject("Scripting.Dictionary")
+            KeyIndexMulti(tblName)  = CreateObject("Scripting.Dictionary")
+            GoTo CONT_T
+        End If
+        
+        arr = TableData(tblName)
+        ' 2) 配列で、かつ2次元か？
+        If Not IsArray(arr) Then
+            WriteLog "ERROR", "BuildKeyIndexes: table is not array: " & tblName
+            KeyIndexSingle(tblName) = CreateObject("Scripting.Dictionary")
+            KeyIndexMulti(tblName)  = CreateObject("Scripting.Dictionary")
+            GoTo CONT_T
+        End If
+        On Error GoTo BAD_ARRAY
+        Dim rUB1 As Long, rUB2 As Long
+        rUB1 = UBound(arr, 1): rUB2 = UBound(arr, 2)
+        On Error GoTo 0
+        If rUB1 < 2 Or rUB2 < 1 Then
+            WriteLog "ERROR", "BuildKeyIndexes: invalid array shape: " & tblName
+            KeyIndexSingle(tblName) = CreateObject("Scripting.Dictionary")
+            KeyIndexMulti(tblName)  = CreateObject("Scripting.Dictionary")
+            GoTo CONT_T
+        End If
+        
+        ' 3) このテーブルで使うキー列ヘッダーの位置を集める
+        Dim keyColIdx() As Long, kc As Long: kc = 0
+        Dim i As Long
+        For i = LBound(Map_IsKey) To UBound(Map_IsKey)
+            If Map_IsKey(i) Then
+                If UBound(Map_SrcCols, 2) >= t Then
+                    Dim srcCol As String: srcCol = Trim$(CStr(Map_SrcCols(i, t)))
+                    If Len(srcCol) > 0 Then
+                        Dim idx As Long
+                        idx = FindColumnIndex(arr, srcCol)
+                        If idx > 0 Then
+                            kc = kc + 1
+                            ReDim Preserve keyColIdx(1 To kc)
+                            keyColIdx(kc) = idx
+                        Else
+                            WriteLog "WARN", "BuildKeyIndexes: key column not found. table=" & tblName & " col=" & srcCol
+                        End If
+                    Else
+                        ' キーに○だが、このテーブルの元列が空 → スキップ
+                    End If
+                End If
+            End If
+        Next
+        
+        Dim dict1 As Object, dictM As Object
+        Set dict1 = CreateObject("Scripting.Dictionary")
+        Set dictM = CreateObject("Scripting.Dictionary")
+        
+        ' 4) 実際にキーを作る
+        If kc > 0 Then
+            Dim r As Long, keyStr As String
+            For r = 2 To rUB1
+                keyStr = BuildKeyFromRow(arr, r, keyColIdx)
+                If Len(keyStr) > 0 Then
+                    If Not dict1.Exists(keyStr) Then dict1.Add keyStr, r
+                    If Not dictM.Exists(keyStr) Then dictM.Add keyStr, New Collection
+                    dictM(keyStr).Add r
+                End If
+            Next
+        Else
+            WriteLog "WARN", "BuildKeyIndexes: no key columns collected for table=" & tblName
+        End If
+        
+        KeyIndexSingle(tblName) = dict1
+        KeyIndexMulti(tblName)  = dictM
+        
+CONT_T:
+        ' 次のテーブルへ
+    Next
+    Exit Sub
+
+BAD_ARRAY:
+    On Error GoTo 0
+    WriteLog "ERROR", "BuildKeyIndexes: UBound failed (not 2D array?) table=" & Map_TblNames(t)
+    KeyIndexSingle(Map_TblNames(t)) = CreateObject("Scripting.Dictionary")
+    KeyIndexMulti(Map_TblNames(t))  = CreateObject("Scripting.Dictionary")
+End Sub
+
+加えて、FindColumnIndex も “ヘッダー比較の前後スペースを無視” できるよう少しだけ強化しておくと、誤差を拾いにくくなります。
+
+Public Function FindColumnIndex(arr As Variant, colName As String) As Long
+    Dim c As Long, target As String
+    target = Trim$(CStr(colName))
+    For c = 1 To UBound(arr, 2)
+        If Trim$(CStr(arr(1, c))) = target Then
+            FindColumnIndex = c
+            Exit Function
+        End If
+    Next
+    FindColumnIndex = 0
+End Function
+
+
+⸻
+
+それでもダメなときの最短切り分け
+	•	インポート直後に、マッピングのテーブル名 と 実ファイル を照合してください。
+例）I1="zaiko" → importFiles\zaiko.csv があるか？
+	•	該当テーブルの CSV を開き、1行目の見出し が Mapping で指定した「元カラム名」と完全一致しているか確認。
+	•	エラー再現時に、Immediate ウィンドウ（Ctrl+G）でログを見て、
+BuildKeyIndexes: key column not found. table=... col=... の警告が出ていないかをチェック。
+
+⸻
+
+必要なら、Mapping の該当行（No / 出力カラム名 / キー / テーブル名列…）のスクショ or 値を教えてください。そこに合わせて最短で直します！
