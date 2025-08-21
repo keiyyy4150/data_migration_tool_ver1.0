@@ -1,16 +1,73 @@
+Attribute VB_Name = "modLogger"
 Option Explicit
 
-'======================================================
-' ログ出力・時刻/フォーマット
-'======================================================
+'=== フォルダを安全に作成（親も順次作成） ===
+Public Function EnsureFolder(ByVal folderPath As String) As Boolean
+    On Error GoTo EH
+    Dim sep As String: sep = Application.PathSeparator
+
+    folderPath = Trim$(folderPath)
+    If Len(folderPath) = 0 Then EnsureFolder = False: Exit Function
+
+    folderPath = Replace(folderPath, "/", sep)
+    folderPath = Replace(folderPath, "\", sep)
+    If Right$(folderPath, 1) = sep Then folderPath = Left$(folderPath, Len(folderPath) - 1)
+
+    If DirExists(folderPath) Then EnsureFolder = True: Exit Function
+    If FileExists(folderPath) Then
+        MsgBox "同名のファイルがあるためフォルダを作成できません:" & vbCrLf & folderPath, vbCritical
+        EnsureFolder = False: Exit Function
+    End If
+
+    Dim parts() As String, cur As String, i As Long
+    parts = Split(folderPath, sep)
+    cur = parts(0)
+    For i = 1 To UBound(parts)
+        cur = cur & sep & parts(i)
+        If Not DirExists(cur) Then
+            If FileExists(cur) Then
+                MsgBox "同名のファイルがあるためフォルダを作成できません:" & vbCrLf & cur, vbCritical
+                EnsureFolder = False: Exit Function
+            End If
+            MkDir cur
+        End If
+    Next
+    EnsureFolder = True
+    Exit Function
+EH:
+    MsgBox "EnsureFolderエラー: " & Err.Number & " " & Err.Description, vbCritical
+    EnsureFolder = False
+End Function
+
+Private Function DirExists(ByVal path As String) As Boolean
+    On Error Resume Next
+    Dim attr As Long
+    If Len(Dir(path, vbDirectory)) = 0 Then
+        DirExists = False
+    Else
+        attr = GetAttr(path)
+        DirExists = ((attr And vbDirectory) = vbDirectory)
+    End If
+    On Error GoTo 0
+End Function
+
+Private Function FileExists(ByVal path As String) As Boolean
+    On Error Resume Next
+    FileExists = (Len(Dir(path)) > 0) And ((GetAttr(path) And vbDirectory) = 0)
+    On Error Go To 0
+End Function
+
+Public Function TimeStamp() As String
+    TimeStamp = Format(Now, "yyyymmdd_hhnnss")
+End Function
 
 Public Sub WriteLog(level As String, message As String)
     On Error Resume Next
     Dim basePath As String, logDir As String, logPath As String
-    basePath = ThisWorkbook.Path
-    logDir = basePath & "\" & LOG_FOLDER & "\"
-    If Len(Dir(logDir, vbDirectory)) = 0 Then MkDir logDir
-    logPath = logDir & "tool_" & Format(Date, "yyyymmdd") & ".log"
+    basePath = ThisWorkbook.Path & Application.PathSeparator
+    logDir = basePath & LOG_FOLDER
+    If Not EnsureFolder(logDir) Then Exit Sub
+    logPath = logDir & Application.PathSeparator & "tool_" & Format(Date, "yyyymmdd") & ".log"
 
     Dim f As Integer
     f = FreeFile
@@ -19,8 +76,3 @@ Public Sub WriteLog(level As String, message As String)
     Close #f
     On Error GoTo 0
 End Sub
-
-Public Function TimeStamp_YYMMDDHHSS() As String
-    ' 仕様に合わせて 分は入れず、秒まで: yyyymmddhhss
-    TimeStamp_YYMMDDHHSS = Format(Now, "yyyymmddhhss")
-End Function
