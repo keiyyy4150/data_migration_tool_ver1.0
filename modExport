@@ -61,7 +61,24 @@ Public Sub WriteRangeAsCsvWithEncoding(lo As ListObject, filePath As String, enc
     arr = lo.DataBodyRange.Value
     rows = UBound(arr, 1): cols = UBound(arr, 2)
     
-    Dim sb As String, r As Long, c As Long
+    ' ヘッダー行をCSVに追加
+    Dim headerLine As String: headerLine = ""
+    Dim headerArr As Variant
+    headerArr = lo.HeaderRowRange.Value
+    Dim c As Long
+    For c = 1 To cols
+        Dim headerCell As String: headerCell = CStr(headerArr(1, c))
+        If InStr(headerCell, """") > 0 Then headerCell = Replace(headerCell, """", """""")
+        If InStr(headerCell, ",") > 0 Or InStr(headerCell, vbCr) > 0 Or InStr(headerCell, vbLf) > 0 Then
+            headerCell = """" & headerCell & """"
+        End If
+        If c > 1 Then headerLine = headerLine & ","
+        headerLine = headerLine & headerCell
+    Next
+    Dim sb As String
+    sb = headerLine & vbCrLf
+    
+    Dim r As Long
     For r = 1 To rows
         Dim line As String: line = ""
         For c = 1 To cols
