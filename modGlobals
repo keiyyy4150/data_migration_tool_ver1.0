@@ -1,46 +1,41 @@
+Attribute VB_Name = "modGlobals"
 Option Explicit
 
-'======================================================
-' グローバル定数・共有変数（全体で使う状態やキャッシュ）
-'======================================================
+'=== フォルダ名（ツールと同階層） ===
+Public Const IMPORT_FOLDER As String = "importFiles"
+Public Const EXPORT_FOLDER As String = "exportFiles"
+Public Const LOG_FOLDER    As String = "log"
 
-Public Const IMPORT_FOLDER As String = "importFiles"   ' 入力CSV置き場（ツールと同階層）
-Public Const EXPORT_FOLDER As String = "exportFiles"   ' 出力CSV置き場（ツールと同階層）
-Public Const LOG_FOLDER    As String = "log"           ' ログ置き場（ツールと同階層）
+'=== エンコード（AUTO/UTF-8/Shift_JIS/UTF-16LE） ===
+Public CurrentEncodingMode As String ' 空なら "AUTO" を採用
 
-' エンコードモード（AUTO/UTF-8/SHIFT_JIS/UTF-16LE）
-Public CurrentEncodingMode As String
+'=== どのパイプラインを処理するか（Main/List） ===
+'   ※テーブル名（＝シート名）で管理します
+Public CurrentMappingTableName As String ' 例: "Mapping_Main" / "Mapping_List"
+Public CurrentMasterTableName  As String ' 例: "Master_Main"  / "Master_List"
+Public CurrentExportPrefix     As String ' "MAIN_" / "LIST_" 等
 
-' 現在のパイプライン（Main or List）→ マスター/マッピングのテーブル名と出力プレフィクス
-Public CurrentMappingTableName As String  ' 例: "Mapping_Main", "Mapping_List"
-Public CurrentMasterTableName  As String  ' 例: "Master_Main",  "Master_List"
-Public CurrentExportPrefix     As String  ' 例: "MAIN_", "LIST_"
+'=== 共有データ（Import → Processで再利用） ===
+Public TableData As Object ' Scripting.Dictionary : Key=テーブル名, Val=2次元配列
+Public KeyIndex  As Object ' Scripting.Dictionary : Key=テーブル名, Val=Dictionary(KeyStr -> 行Index)
+Public RawJoined As Variant ' 無加工JOIN結果
+Public HasRaw    As Boolean ' RawJoinedがあるか
+Public IsProcessed As Boolean ' Masterにあるのが加工済みかどうか
 
-' 読み込んだテーブルデータ（Key: テーブル名（=CSV名）、Value: 2次元配列）
-Public TableData As Object ' Scripting.Dictionary
+'=== JOIN時のベース表情報（RawJoinedを再構築するときに使う） ===
+Public m_baseTblName As String
+Public m_baseRowIdx() As Long ' 出力行 i → ベース表の実行Index（2〜）
 
-' キー索引用（Key: テーブル名, Value: Dictionary(KeyString -> Collection of rowIndexes)）
-' 1対多対応のため、同一キーが複数行ヒットする想定で Collection を保持
-Public KeyIndex As Object ' Scripting.Dictionary
-
-' 無加工JOIN結果（Import時に作る）と状態フラグ
-Public RawJoined As Variant
-Public HasRaw As Boolean
-Public IsProcessed As Boolean
-
-' ===== Mapping キャッシュ（直近読み取り分を保持） =====
-' 列: A:No, B:出力名, C:型, D:ロジック, E:キー, F:モード, G:定義, H以降:各テーブルの元列名
-Public Map_OutCols()  As String  ' 出力カラム名
-Public Map_DataType() As String  ' TEXT/NUMBER/DATE
-Public Map_Logic()    As String  ' 置換ルール（"a→b;c→d"）
-Public Map_IsKey()    As Boolean ' キー列フラグ（○）
+'=== Mappingキャッシュ（テーブルから読込み） ===
+'   ※行は 1..N で揃えています
+Public Map_OutCols()  As String  ' 出力カラム名（Master見出しと一致）
+Public Map_DataType() As String  ' 型 TEXT/NUMBER/DATE
+Public Map_Logic()    As String  ' 置換ロジック "a→b;c→d"
+Public Map_IsKey()    As Boolean ' 複合キー ○/空
 Public Map_Mode()     As String  ' VALUE/CONCAT/EXPR
-Public Map_Def()      As String  ' 定義（CONCAT列挙 or EXPR式/テンプレ）
-Public Map_TblNames() As String  ' H1以降のテーブル名（CSV名；拡張子除く）
-Public Map_SrcCols    As Variant ' 行=出力列, 列=テーブル: 元カラム名（VALUE時）
+Public Map_Def()      As String  ' CONCATの列挙 or EXPRの式/テンプレ/IF*
+Public Map_TblNames() As String  ' H1以降のヘッダ：テーブル名（CSV名の拡張子なし）
+Public Map_SrcCols    As Variant ' (行=出力列, 列=テーブル) の元カラム名
 
-' JOIN時のベーステーブル（通常は最初にキーが成立するテーブル）
-Public BaseTableName As String
-
-' 出力行 r がベーステーブルのどの行に対応するか（2〜の行番号を入れる）
-Public BaseRowIndex() As Long
+'=== エクスポートのベース名（ファイル名に使用） ===
+Public Const EXPORT_BASENAME As String = "inventory"
