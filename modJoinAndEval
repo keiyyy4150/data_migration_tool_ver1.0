@@ -63,43 +63,48 @@ End Function
 ' BuildJoinedRaw（無加工）※ Listパイプラインは1対多で行複製
 '==============================
 Public Function BuildJoinedRaw(baseTbl As String) As Variant
-    Dim outColsCnt As Long: outColsCnt = UBound(Map_OutCols)
+    Dim outColsCnt As Long
+    outColsCnt = UBound(Map_OutCols) - LBound(Map_OutCols) + 1  ' 件数を正確に
+
     Dim baseArr As Variant
     Dim haveBase As Boolean: haveBase = (Len(baseTbl) > 0)
     Dim baseKeyCols() As Long
-    
+
     If Not haveBase Then
-        Dim emptyArr(1 To 1, 1 To outColsCnt) As Variant
-        BuildJoinedRaw = emptyArr: Exit Function
+        Dim emptyArr() As Variant            ' 動的配列
+        ReDim emptyArr(1 To 1, 1 To outColsCnt)
+        BuildJoinedRaw = emptyArr
+        Exit Function
     End If
-    
+
     baseArr = TableData(baseTbl)
     baseKeyCols = CollectKeyColIndexesForBase(baseArr, baseTbl)
-    
-    ' まず行数を見積もってから出力配列を作る
+
+    ' 行数見積もり
     Dim totalRows As Long: totalRows = 0
     Dim r As Long
     For r = 2 To UBound(baseArr, 1)
         Dim myKey As String: myKey = BuildKeyFromRow(baseArr, r, baseKeyCols)
         Dim expand As Long: expand = 1
         If AllowOneToMany Then
-            ' 1対多：全テーブルのマッチ数の最大値を使用
             expand = MaxMatchesForKey(myKey, baseTbl)
             If expand < 1 Then expand = 1
         End If
         totalRows = totalRows + expand
     Next
-    
+
     If totalRows = 0 Then
-        Dim empty2(1 To 1, 1 To outColsCnt) As Variant
-        BuildJoinedRaw = empty2: Exit Function
+        Dim empty2() As Variant              ' ここも動的に
+        ReDim empty2(1 To 1, 1 To outColsCnt)
+        BuildJoinedRaw = empty2
+        Exit Function
     End If
-    
+
     Dim result() As Variant
     ReDim result(1 To totalRows, 1 To outColsCnt)
     ReDim m_baseRowIdx(1 To totalRows)
-    
-    ' 実際に埋める
+
+    ' 実データ埋め
     Dim outRow As Long: outRow = 0
     For r = 2 To UBound(baseArr, 1)
         Dim myKey As String: myKey = BuildKeyFromRow(baseArr, r, baseKeyCols)
@@ -108,7 +113,7 @@ Public Function BuildJoinedRaw(baseTbl As String) As Variant
             expand = MaxMatchesForKey(myKey, baseTbl)
             If expand < 1 Then expand = 1
         End If
-        
+
         Dim k As Long
         For k = 1 To expand
             outRow = outRow + 1
@@ -126,8 +131,8 @@ Public Function BuildJoinedRaw(baseTbl As String) As Variant
             Next
         Next
     Next
-    
-    BuildJoinedRaw = result
+
+    BuildJoinedRaw = result   ' ← 忘れずに返す
 End Function
 
 ' key に対する「各テーブルの一致件数」の最大値
