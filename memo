@@ -1,74 +1,31 @@
-myKey As Stringの箇所で「同じ運用範囲内で宣言が重複してます」というエラーが出ます。
-
-Public Function BuildJoinedRaw(baseTbl As String) As Variant
-    Dim outColsCnt As Long
-    outColsCnt = UBound(Map_OutCols) - LBound(Map_OutCols) + 1  ' 件数を正確に
-
-    Dim baseArr As Variant
-    Dim haveBase As Boolean: haveBase = (Len(baseTbl) > 0)
-    Dim baseKeyCols() As Long
-
-    If Not haveBase Then
-        Dim emptyArr() As Variant            ' 動的配列
-        ReDim emptyArr(1 To 1, 1 To outColsCnt)
-        BuildJoinedRaw = emptyArr
-        Exit Function
-    End If
-
-    baseArr = TableData(baseTbl)
-    baseKeyCols = CollectKeyColIndexesForBase(baseArr, baseTbl)
-
-    ' 行数見積もり
-    Dim totalRows As Long: totalRows = 0
-    Dim r As Long
-    For r = 2 To UBound(baseArr, 1)
-        Dim myKey As String: myKey = BuildKeyFromRow(baseArr, r, baseKeyCols)
-        Dim expand As Long: expand = 1
-        If AllowOneToMany Then
-            expand = MaxMatchesForKey(myKey, baseTbl)
-            If expand < 1 Then expand = 1
+Map_SrcCols(i, tIdx)　の箇所で「引数の型が一致しません」エラーが出ます。日本語で対処法教えてください。
+ 
+'=== ベーステーブルのキー列 index 一式 ===
+Public Function CollectKeyColIndexesForBase(baseArr As Variant, baseTbl As String) As Variant
+    Dim tIdx As Long, i As Long, kc As Long
+    tIdx = IndexOfTable(Map_TblNames, baseTbl)
+    kc = 0
+    For i = LBound(Map_OutCols) To UBound(Map_OutCols)
+        If Map_IsKey(i) Then
+            If (Not Not Map_TblNames) <> 0 And tIdx >= 0 Then
+                If UBound(Map_SrcCols, 2) >= tIdx Then
+                    If Len(Map_SrcCols(i, tIdx)) > 0 Then kc = kc + 1
+                End If
+            End If
         End If
-        totalRows = totalRows + expand
     Next
-
-    If totalRows = 0 Then
-        Dim empty2() As Variant              ' ここも動的に
-        ReDim empty2(1 To 1, 1 To outColsCnt)
-        BuildJoinedRaw = empty2
-        Exit Function
-    End If
-
-    Dim result() As Variant
-    ReDim result(1 To totalRows, 1 To outColsCnt)
-    ReDim m_baseRowIdx(1 To totalRows)
-
-    ' 実データ埋め
-    Dim outRow As Long: outRow = 0
-    For r = 2 To UBound(baseArr, 1)
-        Dim myKey As String: myKey = BuildKeyFromRow(baseArr, r, baseKeyCols)
-        Dim expand As Long: expand = 1
-        If AllowOneToMany Then
-            expand = MaxMatchesForKey(myKey, baseTbl)
-            If expand < 1 Then expand = 1
+    If kc = 0 Then CollectKeyColIndexesForBase = Array(): Exit Function
+    Dim idx() As Long, cur As Long
+    ReDim idx(1 To kc): cur = 0
+    For i = LBound(Map_OutCols) To UBound(Map_OutCols)
+        If Map_IsKey(i) Then
+            If UBound(Map_SrcCols, 2) >= tIdx Then
+                If Len(Map_SrcCols(i, tIdx)) > 0 Then
+                    cur = cur + 1
+                    idx(cur) = FindColumnIndex(baseArr, Map_SrcCols(i, tIdx))  ' ★★★★★★ここでエラー★★★★★★
+                End If
+            End If
         End If
-
-        Dim k As Long
-        For k = 1 To expand
-            outRow = outRow + 1
-            m_baseRowIdx(outRow) = r
-            Dim c As Long
-            For c = 1 To outColsCnt
-                Select Case Map_Mode(c)
-                    Case "CONCAT"
-                        result(outRow, c) = BuildConcatRawValue(Map_Def(c), baseTbl, r, myKey, k)
-                    Case "EXPR"
-                        result(outRow, c) = EvaluateExpr(Map_Def(c), baseTbl, r, myKey, False, c)
-                    Case Else
-                        result(outRow, c) = BuildValueModeRaw(c, baseTbl, r, myKey, k)
-                End Select
-            Next
-        Next
     Next
-
-    BuildJoinedRaw = result
+    CollectKeyColIndexesForBase = idx
 End Function
