@@ -152,31 +152,61 @@ Private Function MaxMatchesForKey(ByVal keyStr As String, baseTbl As String) As 
     MaxMatchesForKey = m
 End Function
 
-'==============================
-' VALUE/CONCAT の raw 取得（k番目のマッチを考慮）
-'==============================
-Public Function BuildValueModeRaw(colIndex As Long, baseTbl As String, baseRow As Long, myKey As String, _
-                                  Optional matchIndex As Long = 1) As Variant
-    Dim t As Long, srcColName As String, srcColIndex As Long, v As Variant
-    v = ""
-    If (Not Not Map_TblNames) = 0 Then BuildValueModeRaw = v: Exit Function
-    
-    For t = LBound(Map_TblNames) To UBound(Map_TblNames)
-        If UBound(Map_SrcCols, 2) >= t Then
-            srcColName = Map_SrcCols(colIndex, t)
-            If Len(srcColName) > 0 Then
-                If Map_TblNames(t) = baseTbl Then
-                    srcColIndex = FindColumnIndex(TableData(baseTbl), srcColName)
-                    If srcColIndex > 0 Then v = TableData(baseTbl)(baseRow, srcColIndex)
-                    Exit For
-                Else
-                    v = GetValueFromTableMulti(Map_TblNames(t), srcColName, myKey, matchIndex)
-                    If Len(CStr(v)) > 0 Then Exit For
+'--- VALUEモード（無加工Raw）取得：G列以降のセルに「複数カラム名」を改行や | で書いた場合は
+'    そのすべてから値を取り、改行で連結して返す ---
+Private Function BuildValueModeRaw(colIndex As Long, baseTbl As String, baseRow As Long, myKey As String) As Variant
+    Dim t As Long, srcSpec As String, acc As String
+    BuildValueModeRaw = ""  ' 既定は空
+    If (Not Not m_tblNames) = 0 Then Exit Function  ' テーブル未定義なら即終了
+
+    ' テーブルの優先順に走査（従来と同じ）。最初に値が作れたテーブルで確定。
+    For t = LBound(m_tblNames) To UBound(m_tblNames)
+
+        If UBound(m_srcCols, 2) >= t Then
+            srcSpec = CStr(m_srcCols(colIndex, t))  ' その出力列×テーブルの「元カラム指定文字列」
+
+            If Len(srcSpec) > 0 Then
+                ' 1) 区切りの正規化：改行（CRLF/LF）とパイプ(|)を“LF”に寄せて分割
+                Dim spec As String
+                spec = Replace(srcSpec, vbCrLf, vbLf)
+                spec = Replace(spec, "|", vbLf)
+
+                Dim parts() As String, k As Long
+                parts = Split(spec, vbLf)
+
+                acc = ""  ' このテーブルでの連結バッファ
+
+                ' 2) 指定された複数カラムを順に解決（無加工値）
+                For k = LBound(parts) To UBound(parts)
+                    Dim one As String, v As String
+                    one = Trim$(parts(k))
+                    If Len(one) = 0 Then GoTo CONT_K  ' 空行はスキップ
+
+                    If m_tblNames(t) = baseTbl Then
+                        ' ベース表なら自行から
+                        v = GetValueFromTable(baseTbl, one, baseTbl, baseRow, myKey)
+                    Else
+                        ' 他表ならキーで突合後の行から
+                        v = GetValueFromTable(m_tblNames(t), one, baseTbl, baseRow, myKey)
+                    End If
+
+                    If Len(acc) = 0 Then
+                        acc = v
+                    Else
+                        acc = acc & vbLf & v
+                    End If
+CONT_K:
+                Next k
+
+                ' 3) このテーブル指定で何かしら値を組み立てられたら確定（従来の優先ルール）
+                If Len(acc) > 0 Then
+                    BuildValueModeRaw = acc
+                    Exit Function
                 End If
             End If
         End If
-    Next
-    BuildValueModeRaw = v
+
+    Next t
 End Function
 
 Public Function BuildConcatRawValue(def As String, baseTbl As String, baseRow As Long, myKey As String, _
