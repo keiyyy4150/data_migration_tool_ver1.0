@@ -199,7 +199,7 @@ Public Function GetListObjectByName(tableName As String) As ListObject
     Dim ws As Worksheet, lo As ListObject
     For Each ws In ThisWorkbook.Worksheets
         For Each lo In ws.ListObjects
-            If lo.Name = tableName Then
+            If lo.name = tableName Then
                 Set GetListObjectByName = lo
                 Exit Function
             End If
@@ -207,3 +207,4 @@ Public Function GetListObjectByName(tableName As String) As ListObject
     Next
     Set GetListObjectByName = Nothing
 End Function
+
