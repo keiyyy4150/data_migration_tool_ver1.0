@@ -74,6 +74,9 @@ End Function
 '==============================
 ' キー索引（Single: 1件、Multi: 複数行）
 '==============================
+'==============================
+' キー索引（Single: 1件、Multi: 複数行）堅牢版
+'==============================
 Public Sub BuildKeyIndexes()
     Set KeyIndexSingle = CreateObject("Scripting.Dictionary")
     Set KeyIndexMulti  = CreateObject("Scripting.Dictionary")
@@ -82,18 +85,56 @@ Public Sub BuildKeyIndexes()
     If (Not Not Map_TblNames) = 0 Then Exit Sub
     
     For t = LBound(Map_TblNames) To UBound(Map_TblNames)
-        Dim arr As Variant: arr = TableData(Map_TblNames(t))
-        Dim keyColIdx() As Long, kc As Long: kc = 0
+        Dim tblName As String: tblName = Map_TblNames(t)
+        Dim arr As Variant
         
-        ' このテーブルでキーに使う列（Mapping の「○」が立っていて、かつ元列名が指定されている列）を集める
+        ' 1) テーブルが読み込まれているか？
+        If Not TableData.Exists(tblName) Then
+            WriteLog "ERROR", "BuildKeyIndexes: table not loaded: " & tblName
+            ' 空の辞書でも入れておく
+            KeyIndexSingle(tblName) = CreateObject("Scripting.Dictionary")
+            KeyIndexMulti(tblName)  = CreateObject("Scripting.Dictionary")
+            GoTo CONT_T
+        End If
+        
+        arr = TableData(tblName)
+        ' 2) 配列で、かつ2次元か？
+        If Not IsArray(arr) Then
+            WriteLog "ERROR", "BuildKeyIndexes: table is not array: " & tblName
+            KeyIndexSingle(tblName) = CreateObject("Scripting.Dictionary")
+            KeyIndexMulti(tblName)  = CreateObject("Scripting.Dictionary")
+            GoTo CONT_T
+        End If
+        On Error GoTo BAD_ARRAY
+        Dim rUB1 As Long, rUB2 As Long
+        rUB1 = UBound(arr, 1): rUB2 = UBound(arr, 2)
+        On Error GoTo 0
+        If rUB1 < 2 Or rUB2 < 1 Then
+            WriteLog "ERROR", "BuildKeyIndexes: invalid array shape: " & tblName
+            KeyIndexSingle(tblName) = CreateObject("Scripting.Dictionary")
+            KeyIndexMulti(tblName)  = CreateObject("Scripting.Dictionary")
+            GoTo CONT_T
+        End If
+        
+        ' 3) このテーブルで使うキー列ヘッダーの位置を集める
+        Dim keyColIdx() As Long, kc As Long: kc = 0
         Dim i As Long
         For i = LBound(Map_IsKey) To UBound(Map_IsKey)
             If Map_IsKey(i) Then
                 If UBound(Map_SrcCols, 2) >= t Then
-                    If Len(Map_SrcCols(i, t)) > 0 Then
-                        kc = kc + 1
-                        ReDim Preserve keyColIdx(1 To kc)
-                        keyColIdx(kc) = FindColumnIndex(arr, Map_SrcCols(i, t))
+                    Dim srcCol As String: srcCol = Trim$(CStr(Map_SrcCols(i, t)))
+                    If Len(srcCol) > 0 Then
+                        Dim idx As Long
+                        idx = FindColumnIndex(arr, srcCol)
+                        If idx > 0 Then
+                            kc = kc + 1
+                            ReDim Preserve keyColIdx(1 To kc)
+                            keyColIdx(kc) = idx
+                        Else
+                            WriteLog "WARN", "BuildKeyIndexes: key column not found. table=" & tblName & " col=" & srcCol
+                        End If
+                    Else
+                        ' キーに○だが、このテーブルの元列が空 → スキップ
                     End If
                 End If
             End If
@@ -103,21 +144,32 @@ Public Sub BuildKeyIndexes()
         Set dict1 = CreateObject("Scripting.Dictionary")
         Set dictM = CreateObject("Scripting.Dictionary")
         
+        ' 4) 実際にキーを作る
         If kc > 0 Then
             Dim r As Long, keyStr As String
-            For r = 2 To UBound(arr, 1)
+            For r = 2 To rUB1
                 keyStr = BuildKeyFromRow(arr, r, keyColIdx)
                 If Len(keyStr) > 0 Then
-                    ' Single: まだ無ければ登録
                     If Not dict1.Exists(keyStr) Then dict1.Add keyStr, r
-                    ' Multi: 常にCollectionに追加
                     If Not dictM.Exists(keyStr) Then dictM.Add keyStr, New Collection
                     dictM(keyStr).Add r
                 End If
             Next
+        Else
+            WriteLog "WARN", "BuildKeyIndexes: no key columns collected for table=" & tblName
         End If
         
-        KeyIndexSingle(Map_TblNames(t)) = dict1
-        KeyIndexMulti(Map_TblNames(t))  = dictM
+        KeyIndexSingle(tblName) = dict1
+        KeyIndexMulti(tblName)  = dictM
+        
+CONT_T:
+        ' 次のテーブルへ
     Next
+    Exit Sub
+
+BAD_ARRAY:
+    On Error GoTo 0
+    WriteLog "ERROR", "BuildKeyIndexes: UBound failed (not 2D array?) table=" & Map_TblNames(t)
+    KeyIndexSingle(Map_TblNames(t)) = CreateObject("Scripting.Dictionary")
+    KeyIndexMulti(Map_TblNames(t))  = CreateObject("Scripting.Dictionary")
 End Sub
