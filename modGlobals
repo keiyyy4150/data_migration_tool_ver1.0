@@ -45,11 +45,11 @@ Public Map_SrcCols    As Variant ' 行=出力列, 列=テーブル：元カラ�
 
 ' JOIN再構築で使うベース情報
 Public m_baseTblName As String        ' ベーステーブル名
-Public m_baseRowIdx() As Long         ' 出力行 → ベース行 index（2〜の値）
+Public m_baseRowIdx() As Long         ' 出力行 → ベース行 index（2?の値）
 
 ' 便利関数（全モジュールで使う）
 Public Function TimeStamp() As String
-    TimeStamp = Format(Now, "yyyymmdd_hhnnss")
+    TimeStamp = Format(Now, "yyyymmddhhmmss")
 End Function
 
 ' Variant 変数に入っている配列が「割り当て済み」かどうか判定
