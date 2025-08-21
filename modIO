@@ -1,5 +1,33 @@
 Option Explicit
 
+'=== 区切り文字の簡易自動判定（1行目のみ・クォート内は概ね考慮） ===
+Private Function DetectDelimiterFromText(ByVal txt As String) As String
+    Dim firstLine As String, p As Long
+    p = InStr(txt, vbLf)
+    If p = 0 Then firstLine = txt Else firstLine = Left$(txt, p - 1)
+
+    Dim i As Long, ch As String * 1, inQ As Boolean, q As String * 1
+    Dim cntComma As Long, cntTab As Long, cntSemi As Long
+    For i = 1 To Len(firstLine)
+        ch = Mid$(firstLine, i, 1)
+        If ch = """" Or ch = "'" Then
+            If inQ Then
+                If ch = q Then inQ = False
+            Else
+                inQ = True: q = ch
+            End If
+        ElseIf Not inQ Then
+            If ch = "," Then cntComma = cntComma + 1
+            If ch = vbTab Then cntTab = cntTab + 1
+            If ch = ";" Then cntSemi = cntSemi + 1
+        End If
+    Next
+    If cntTab >= cntComma And cntTab >= cntSemi Then DetectDelimiterFromText = vbTab _
+    ElseIf cntComma >= cntSemi Then DetectDelimiterFromText = "," _
+    Else DetectDelimiterFromText = ";"
+End Function
+
+
 '==============================
 ' フォルダ作成（存在しなければ作成）
 '==============================
@@ -21,12 +49,19 @@ End Function
 
 ' RFC4180 簡易：ダブルクォートと改行を処理
 Public Function ParseCsvText(ByVal txt As String) As Variant
-    Dim i As Long, ch As String * 1
+    Dim delim As String
+    delim = DetectDelimiterFromText(txt)  ' ★ 自動判定
+
+    Dim i As Long, ch As String * 1, d As String
     Dim inQuote As Boolean
     Dim field As String, row As Collection, rows As Collection
     Set rows = New Collection: Set row = New Collection
     field = "": inQuote = False
-    
+
+    ' 改行統一
+    txt = Replace$(txt, vbCrLf, vbLf)
+    txt = Replace$(txt, vbCr, vbLf)
+
     For i = 1 To Len(txt)
         ch = Mid$(txt, i, 1)
         If inQuote Then
@@ -40,28 +75,26 @@ Public Function ParseCsvText(ByVal txt As String) As Variant
                 field = field & ch
             End If
         Else
+            d = Mid$(delim, 1, 1)
             Select Case ch
                 Case """": inQuote = True
-                Case ",":  row.Add field: field = ""
-                Case vbCr ' 無視
+                Case d:   row.Add field: field = ""
                 Case vbLf: row.Add field: field = "": rows.Add row: Set row = New Collection
                 Case Else: field = field & ch
             End Select
         End If
     Next
     row.Add field: rows.Add row
-    
+
     Dim maxCol As Long, r As Long
     For r = 1 To rows.Count
         If rows(r).Count > maxCol Then maxCol = rows(r).Count
     Next
-    
     Dim result() As Variant, rr As Long, cc As Long
     If rows.Count = 0 Then
         ReDim result(1 To 1, 1 To 1): result(1, 1) = ""
         ParseCsvText = result: Exit Function
     End If
-    
     ReDim result(1 To rows.Count, 1 To maxCol)
     For rr = 1 To rows.Count
         For cc = 1 To rows(rr).Count
