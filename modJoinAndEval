@@ -1,22 +1,4 @@
-Attribute VB_Name = "modJoinAndEval"
 Option Explicit
-
-' ============================================================
-'  前提（他モジュールで定義されているもの）
-'  - Map_TblNames() As String
-'  - Map_OutCols()  : 出力列マッピングのインデクサ（LBound/UBoundのみ参照）
-'  - Map_SrcCols(出力列, テーブルIdx) : 列名（文字列）or 列番号（数値）
-'  - Map_IsKey(i) As Boolean
-'  - Map_Mode(i) As String     : "VALUE" / "CONCAT" / "EXPR" など
-'  - Map_Def(i) As String      : 各列の定義
-'  - Map_DataType(i) As String : "NUMBER" / "DATE" / "TEXT" など
-'  - Map_Logic(i) As String    : 置換ルール "◯→はい;×→いいえ" など
-'  - TableData(tblName) As Variant : 1-based 2次元配列（[行, 列]）
-'  - KeyIndexMulti(tblName) As Object : keyStr -> Collection(行番号) の辞書
-'  - m_baseTblName As String
-'  - m_baseRowIdx() As Long    : 出力行 → ベース表の行Index（1-based）
-'  - AllowOneToMany As Boolean
-' ============================================================
 
 '=== 列名→列番号（見出し=1行目）
 Public Function FindColumnIndex(arr As Variant, colName As String) As Long
