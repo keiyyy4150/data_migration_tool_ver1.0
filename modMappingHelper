@@ -171,11 +171,18 @@ BAD_ARRAY:
 End Sub
 
 
+Private Function Norm(ByVal s As String) As String
+    If Len(s) = 0 Then Norm = "" : Exit Function
+    s = Replace$(s, ChrW(&HFEFF), "") ' UTF-8 BOM
+    s = Trim$(s)
+    Norm = s
+End Function
+
 Public Function FindColumnIndex(arr As Variant, colName As String) As Long
     Dim c As Long, target As String
-    target = Trim$(CStr(colName))
+    target = Norm(colName)
     For c = 1 To UBound(arr, 2)
-        If Trim$(CStr(arr(1, c))) = target Then
+        If Norm(CStr(arr(1, c))) = target Then
             FindColumnIndex = c
             Exit Function
         End If
