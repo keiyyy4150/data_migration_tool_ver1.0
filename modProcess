@@ -104,7 +104,7 @@ Public Sub ImportFiles()
     WriteLog "INFO", "PickBaseTableName succeeded"
      
     ' 無加工JOIN
-    RawJoined = BuildJoinedRaw(m_baseTblName) '
+    RawJoined = BuildJoinedRaw(m_baseTblName)
     HasRaw = True: IsProcessed = False
     
     WriteLog "INFO", "RawJoined succeeded"
@@ -191,42 +191,78 @@ End Sub
 ' Clear：Masterクリア＆中間データ破棄（安全版）
 '==============================
 Public Sub ClearData()
-    On Error Resume Next
-    Dim masterLo As ListObject
+    Dim prevCalc As XlCalculation
+    Dim prevUpd As Boolean, prevEvt As Boolean, prevDisp As Boolean
+    Dim t0 As Double: t0 = Timer
+
+    ' パイプライン未設定なら既定へ
     If Len(CurrentMasterTableName) = 0 Then UsePipelineMain
-    Set masterLo = GetListObjectByName(CurrentMasterTableName)
-    If Not masterLo Is Nothing Then
-        If Not masterLo.DataBodyRange Is Nothing Then masterLo.DataBodyRange.ClearContents
-    End If
+
+    ' アプリ状態を退避＆高速化設定
+    On Error Resume Next
+    prevUpd = Application.ScreenUpdating
+    prevEvt = Application.EnableEvents
+    prevDisp = Application.DisplayAlerts
+    prevCalc = Application.Calculation
+    Application.ScreenUpdating = False
+    Application.EnableEvents = False
+    Application.DisplayAlerts = False
+    Application.Calculation = xlCalculationManual
     On Error GoTo 0
 
-    ' 状態フラグ
+    On Error GoTo EH
+    Dim lo As ListObject
+    Set lo = GetListObjectByName(CurrentMasterTableName)
+    If Not lo Is Nothing Then
+        ' フィルタがかかっていたら解除（削除速度が上がる & エラー回避）
+        On Error Resume Next
+        If Not lo.AutoFilter Is Nothing Then lo.AutoFilter.ShowAllData
+        On Error GoTo 0
+
+        If Not lo.DataBodyRange Is Nothing Then
+            lo.DataBodyRange.Delete
+        End If
+    End If
+
+    ' 中間データの解放（未初期化でも安全に呼べるよう注意）
     HasRaw = False
     IsProcessed = False
 
-    ' ▼ RawJoined は Variant。配列のときだけ Erase、そうでなければ Empty に。
-    If IsArray(RawJoined) Then
-        Erase RawJoined
-    Else
-        RawJoined = Empty
-    End If
-
-    ' ▼ m_baseRowIdx は Long() の動的配列。割り当て済みかチェックしてから Erase。
-    If IsAllocated_Long(m_baseRowIdx) Then
-        Erase m_baseRowIdx
-    End If
+    On Error Resume Next
+    If (Not Not RawJoined) <> 0 Then Erase RawJoined  ' 配列なら解放
+    If (Not Not m_baseRowIdx) <> 0 Then Erase m_baseRowIdx
+    On Error GoTo 0
 
     m_baseTblName = ""
-
-    ' ▼辞書や参照は Nothing に
     Set TableData = Nothing
     Set KeyIndexSingle = Nothing
     Set KeyIndexMulti = Nothing
 
-    If Not masterLo Is Nothing Then ResetMasterSize masterLo
-WriteLog "INFO", "ClearData: Master cleared & memory freed"
+    WriteLog "INFO", "ClearData: cleared in " & Format(Timer - t0, "0.00") & "s"
+
+DONE:
+    ' アプリ状態を戻す
+    On Error Resume Next
+    Application.ScreenUpdating = prevUpd
+    Application.EnableEvents = prevEvt
+    Application.DisplayAlerts = prevDisp
+    Application.Calculation = prevCalc
+    On Error GoTo 0
+
     MsgBox "初期化しました。", vbInformation
+    Exit Sub
+
+EH:
+    On Error Resume Next
+    Application.ScreenUpdating = prevUpd
+    Application.EnableEvents = prevEvt
+    Application.DisplayAlerts = prevDisp
+    Application.Calculation = prevCalc
+    On Error GoTo 0
+    WriteLog "ERROR", "ClearData error: " & Err.Number & " " & Err.Description
+    MsgBox "ClearDataでエラー: " & Err.Description, vbCritical
 End Sub
+
 
 '==============================
 ' Masterへ貼付（行数だけ合わせて一括代入）
