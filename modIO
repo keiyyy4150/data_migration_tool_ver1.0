@@ -22,9 +22,15 @@ Private Function DetectDelimiterFromText(ByVal txt As String) As String
             If ch = ";" Then cntSemi = cntSemi + 1
         End If
     Next
-    If cntTab >= cntComma And cntTab >= cntSemi Then DetectDelimiterFromText = vbTab _
-    ElseIf cntComma >= cntSemi Then DetectDelimiterFromText = "," _
-    Else DetectDelimiterFromText = ";"
+ 
+    If (cntTab >= cntComma) And (cntTab >= cntSemi) Then
+        DetectDelimiterFromText = vbTab
+    ElseIf cntComma >= cntSemi Then
+        DetectDelimiterFromText = ","
+    Else
+        DetectDelimiterFromText = ";"
+    End If
+
 End Function
 
 
@@ -240,4 +246,5 @@ Public Function GetListObjectByName(tableName As String) As ListObject
     Next
     Set GetListObjectByName = Nothing
 End Function
+
 
