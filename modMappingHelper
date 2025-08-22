@@ -172,7 +172,7 @@ End Sub
 
 
 Private Function Norm(ByVal s As String) As String
-    If Len(s) = 0 Then Norm = "" : Exit Function
+    If Len(s) = 0 Then Norm = "": Exit Function
     s = Replace$(s, ChrW(&HFEFF), "") ' UTF-8 BOM
     s = Trim$(s)
     Norm = s
