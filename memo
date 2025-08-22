@@ -1,63 +1,52 @@
-Public Function BuildValueModeRaw(colIndex As Long, baseTbl As String, baseRow As Long, myKey As String, _
-                                  Optional matchIndex As Long = 1) As Variant
-    Dim t As Long, v As Variant
-    v = ""
-    If (Not Not Map_TblNames) = 0 Then BuildValueModeRaw = v: Exit Function
+以下のパターンでデータ加工が発生します。
+テーブルは「pcm_t_コンプラ相談」テーブル（H列記載）と「pcm_t_コンプラ相談部内連絡」テーブル（I列記載）です。
+２つのテーブルは”相談SEQ”カラムを連結キーとしています。
+マッピングの設定はどのように記載するのか。また既存のコードで不可であればどこを直せばよいのか教えてください。
 
-    Dim isValue As Boolean
-    isValue = (UCase$(Map_Mode(colIndex)) = "VALUE" Or Len(Map_Mode(colIndex)) = 0)
+①pcm_t_コンプラ相談.相談状態="01" かつpcm_t_コンプラ相談.追加相談＝0の場合、出力カラムの状態に"作成中"を入れる。
+pcm_t_コンプラ相談.相談状態="02" かつpcm_t_コンプラ相談.追加相談＝0の場合、出力カラムの状態に"回答中"を入れる。
+pcm_t_コンプラ相談.相談状態="03" かつpcm_t_コンプラ相談.追加相談＝0の場合、出力カラムの状態に"回答済"を入れる。
+pcm_t_コンプラ相談.相談状態="01" かつpcm_t_コンプラ相談.追加相談＝1の場合、出力カラムの状態に"作成中（追加相談）"を入れる。
+pcm_t_コンプラ相談.相談状態="02" かつpcm_t_コンプラ相談.追加相談＝1の場合、出力カラムの状態に"回答中（追加相談）"を入れる。
+pcm_t_コンプラ相談.相談状態="03" かつpcm_t_コンプラ相談.追加相談＝1の場合、出力カラムの状態に"回答済（追加相談）"を入れる。
 
-    For t = LBound(Map_TblNames) To UBound(Map_TblNames)
-        Dim names As Collection: Set names = SafeGetSrcColNames(colIndex, t)
-        If names Is Nothing Or names.Count = 0 Then GoTo CONT_T
+※複数一致した場合は改行で値が入る。インポートボタン押下時の処理はpcm_t_コンプラ相談.相談状態とpcm_t_コンプラ相談.追加相談の無加工データが改行で入っている。
 
-        If Map_TblNames(t) = baseTbl Then
-            ' ===== ベーステーブル：既存どおり、VALUEは複数列を改行連結 =====
-            Dim arr As Variant: arr = TableData(baseTbl)
-            Dim acc As String: acc = ""
-            Dim j As Long, one As String, ci As Long, valStr As String
-            For j = 1 To names.Count
-                one = names(j)
-                If IsNumeric(one) Then
-                    ci = CLng(one)
-                Else
-                    ci = FindColumnIndex(arr, one)
-                End If
-                If ci > 0 Then
-                    valStr = CStr(arr(baseRow, ci))
-                    If isValue Then
-                        If Len(valStr) > 0 Then
-                            If Len(acc) = 0 Then acc = valStr Else acc = acc & vbLf & valStr
-                        End If
-                    Else
-                        v = valStr: Exit For
-                    End If
-                End If
-            Next
-            If isValue Then v = acc
-            If Len(CStr(v)) > 0 Then BuildValueModeRaw = v: Exit Function
+②pcm_t_コンプラ相談.相談区分="01"の場合、出力カラムの相談区分①に"一般懸賞"を入れる。
+pcm_t_コンプラ相談.相談区分="02"の場合、出力カラムの相談区分①に"総付景品"を入れる。
+pcm_t_コンプラ相談.相談区分="03"の場合、出力カラムの相談区分①に"値引き等"を入れる。
+pcm_t_コンプラ相談.相談区分="04"の場合、出力カラムの相談区分①に"オープン懸賞"を入れる。
 
-        Else
-            ' ===== ベース以外のテーブル：ここを修正 =====
-            ' これまで「最初に見つかった1個で終了」だったのを、
-            ' MODE=VALUE のときは複数列を改行連結するように変更
-            Dim acc2 As String: acc2 = ""
-            Dim j2 As Long, nm As String, got As String
-            For j2 = 1 To names.Count
-                nm = names(j2)
-                got = GetValueFromTableMulti(Map_TblNames(t), nm, myKey, matchIndex)
-                If isValue Then
-                    If Len(got) > 0 Then
-                        If Len(acc2) = 0 Then acc2 = got Else acc2 = acc2 & vbLf & got
-                    End If
-                Else
-                    If Len(got) > 0 Then v = got: Exit For
-                End If
-            Next
-            If isValue Then v = acc2
-            If Len(CStr(v)) > 0 Then BuildValueModeRaw = v: Exit Function
-        End If
-CONT_T:
-    Next
-    BuildValueModeRaw = v
-End Function
+※複数一致した場合は改行で値が入る。
+
+③pcm_t_コンプラ相談.相談区分="05"の場合、出力カラムの相談区分②に"同一施策の連続実施"を入れる。
+pcm_t_コンプラ相談.相談区分="06"の場合、出力カラムの相談区分②に"表示規制"を入れる。
+pcm_t_コンプラ相談.相談区分="07"の場合、出力カラムの相談区分②に"海外"を入れる。
+pcm_t_コンプラ相談.相談区分="08"の場合、出力カラムの相談区分②に"その他"を入れる。
+
+※複数一致した場合は改行で値が入る。
+
+④出力カラムの実施期間複数選択は初期値1
+
+⑤pcm_t_コンプラ相談.情報統制フラグ=01の場合、出力カラムの情報統制フラグに"無"、pcm_t_コンプラ相談.情報統制フラグ=02の場合、出力カラムの情報統制フラグに"有"を入れる。
+
+⑥pcm_t_コンプラ相談部内連絡.回答分類_一般懸賞=1の場合、出力カラムの回答分類に"一般懸賞"を入れる。
+pcm_t_コンプラ相談部内連絡.回答分類_総付景品=1の場合、出力カラムの回答分類に"総付景品"を入れる。
+pcm_t_コンプラ相談部内連絡.回答分類_値引き等=1の場合、出力カラムの回答分類に"値引き等"を入れる。
+pcm_t_コンプラ相談部内連絡.回答分類_オープン懸賞=1の場合、出力カラムの回答分類に"オープン懸賞"を入れる。
+pcm_t_コンプラ相談部内連絡.回答分類_同一施策の連続実施=1の場合、出力カラムの回答分類に"同一施策の連続実施"を入れる。
+pcm_t_コンプラ相談部内連絡.回答分類_表示規制=1の場合、出力カラムの回答分類に"表示規制"を入れる。
+pcm_t_コンプラ相談部内連絡.回答分類_海外=1の場合、出力カラムの回答分類に"_海外"を入れる。
+pcm_t_コンプラ相談部内連絡.回答分類_弁護士相談=1の場合、出力カラムの回答分類に"_弁護士相談"を入れる。
+pcm_t_コンプラ相談部内連絡.回答分類_消費者庁=1の場合、出力カラムの回答分類に"_消費者庁"を入れる。
+pcm_t_コンプラ相談部内連絡.回答分類_その他=1の場合、出力カラムの回答分類に"_その他"を入れる。
+
+※複数一致した場合は改行で値が入る。
+
+⑦pcm_t_コンプラ相談.実施可否="01"の場合、出力カラムの実施可否に"実施可"、pcm_t_コンプラ相談.実施可否="02"の場合、出力カラムの実施可否に"一部実施可"、pcm_t_コンプラ相談.実施可否="03"の場合、出力カラムの実施可否に"実施不可"を入れる。
+
+⑧pcm_t_コンプラ相談.実施可否に値が入っている場合、出力カラム備考にもともと入っている値に改行で"実施可否参照"が入る。
+
+⑨出力カラムのSEQには、pcm_t_コンプラ相談.SEQの値の最初に"R"を追加する。
+
+⑩とくにロジックに何も記載されていないものは加工対象外のため元データを入れる。
