@@ -1,36 +1,61 @@
 Option Explicit
 
-'=== 文字列ユーティリティ（ヘッダ正規化） ===
+'=== 文字列を「ヘッダ用に」正規化（BOM除去＋Trim） ===
 Private Function NormalizeHeader(ByVal s As String) As String
-    If Len(s) = 0 Then NormalizeHeader = "" : Exit Function
-    s = Replace$(s, ChrW(&HFEFF), "") ' BOM除去
+    If Len(s) = 0 Then
+        NormalizeHeader = ""
+        Exit Function
+    End If
+    s = Replace$(s, ChrW(&HFEFF), "") ' UTF-8 BOM を除去
     s = Trim$(s)
     NormalizeHeader = s
 End Function
 
 '=== 改行・| 区切りで複数列名を返す（空は除外） ===
+' Mappingの「元カラム」セルに
+'   在庫id
+'   在庫枝番
+' のように改行で複数書く、または「在庫id | 在庫枝番」のように | 区切りで複数書いた場合、
+' それらを1つずつ取り出して Collection にして返します。
+' 余分な空白・BOMを取り除き、空文字は無視します。
 Private Function SafeGetSrcColNames(i As Long, tIdx As Long) As Collection
     Dim col As New Collection
-    Dim raw As String: raw = SafeGetSrcColName(i, tIdx) ' 既存の単体取得
-    If Len(raw) = 0 Then Set SafeGetSrcColNames = col: Exit Function
 
+    ' まずは既存の「単体取得」関数から生文字列をもらう（ここには改行や | が含まれうる）
+    Dim raw As String
+    raw = SafeGetSrcColName(i, tIdx)
+    If Len(raw) = 0 Then
+        Set SafeGetSrcColNames = col
+        Exit Function
+    End If
+
+    ' 区切りの正規化：CRLF / CR を LF に統一し、 | も LF に置換（＝同じ区切りとして扱う）
     Dim s As String
     s = Replace$(raw, vbCrLf, vbLf)
     s = Replace$(s, vbCr, vbLf)
-    s = Replace$(s, "|", vbLf) ' | も分割として許可
-    Dim arr() As String, k As Long, one As String
+    s = Replace$(s, "|", vbLf)
+
+    ' 1行ずつ取り出して整形
+    Dim arr() As String
+    Dim k As Long
+    Dim one As String
+
     arr = Split(s, vbLf)
     For k = LBound(arr) To UBound(arr)
-        one = NormalizeHeader(arr[k])
-        If Len(one) > 0 Then col.Add one
+        ' ★ 修正点：arr[k] → arr(k)（VBAは丸かっこで参照）
+        one = NormalizeHeader(arr(k))   ' 前後空白やBOMを除去して見出しとして使える形にする
+        If Len(one) > 0 Then
+            col.Add one                 ' 空は無視、値だけ追加
+        End If
     Next
+
     Set SafeGetSrcColNames = col
 End Function
 
 
 '=== 列名→列番号（見出し=1行目）
 Private Function Norm(ByVal s As String) As String
-    If Len(s) = 0 Then Norm = "" : Exit Function
+    If Len(s) = 0 Then Norm = "": Exit Function
     s = Replace$(s, ChrW(&HFEFF), "") ' UTF-8 BOM
     s = Trim$(s)
     Norm = s
@@ -77,8 +102,7 @@ Private Function SafeGetSrcColName(i As Long, tIdx As Long) As String
     lb1 = LBound(Map_SrcCols, 1): ub1 = UBound(Map_SrcCols, 1)
     lb2 = LBound(Map_SrcCols, 2): ub2 = UBound(Map_SrcCols, 2)
 
-    ' tIdx は IndexOfTable の返り値（0/1 始まりの可能性あり）
-    ' Map_SrcCols 第2次元の下限に合わせて補正
+    ' tIdx は IndexOfTable の返り値
     Dim tAdj As Long
     ' 一般的：Map_TblNames が 0始まり、Map_SrcCols 第2次元が 1始まり
     ' その場合は +1 する
@@ -107,27 +131,28 @@ End Function
 '=== ベーステーブルのキー列 index 一式を返す（列名→列番号）
 Public Function CollectKeyColIndexesForBase(baseArr As Variant, baseTbl As String) As Variant
     Dim tIdx As Long, i As Long, kc As Long
+    Dim names As Collection
     tIdx = IndexOfTable(Map_TblNames, baseTbl)
     If tIdx < LBound(Map_TblNames) Then
         CollectKeyColIndexesForBase = Array(): Exit Function
     End If
-
+ 
     ' 件数カウント
     kc = 0
     For i = LBound(Map_OutCols) To UBound(Map_OutCols)
         If Map_IsKey(i) Then
-            Dim names As Collection: Set names = SafeGetSrcColNames(i, tIdx)
+            Set names = SafeGetSrcColNames(i, tIdx)
             If Not names Is Nothing Then If names.Count > 0 Then kc = kc + 1
         End If
     Next
     If kc = 0 Then CollectKeyColIndexesForBase = Array(): Exit Function
-
+ 
     Dim idx() As Long, cur As Long
     ReDim idx(1 To kc): cur = 0
-
+ 
     For i = LBound(Map_OutCols) To UBound(Map_OutCols)
         If Map_IsKey(i) Then
-            Dim names As Collection: Set names = SafeGetSrcColNames(i, tIdx)
+            Set names = SafeGetSrcColNames(i, tIdx)
             If Not names Is Nothing Then
                 Dim picked As Long: picked = 0
                 Dim j As Long, nm As String, ci As Long
@@ -268,6 +293,7 @@ Public Function BuildValueModeRaw(colIndex As Long, baseTbl As String, baseRow A
         If names Is Nothing Or names.Count = 0 Then GoTo CONT_T
 
         If Map_TblNames(t) = baseTbl Then
+            ' ===== ベーステーブル：既存どおり、VALUEは複数列を改行連結 =====
             Dim arr As Variant: arr = TableData(baseTbl)
             Dim acc As String: acc = ""
             Dim j As Long, one As String, ci As Long, valStr As String
@@ -293,12 +319,20 @@ Public Function BuildValueModeRaw(colIndex As Long, baseTbl As String, baseRow A
             If Len(CStr(v)) > 0 Then BuildValueModeRaw = v: Exit Function
 
         Else
+            Dim acc2 As String: acc2 = ""
             Dim j2 As Long, nm As String, got As String
             For j2 = 1 To names.Count
                 nm = names(j2)
                 got = GetValueFromTableMulti(Map_TblNames(t), nm, myKey, matchIndex)
-                If Len(got) > 0 Then v = got: Exit For
+                If isValue Then
+                    If Len(got) > 0 Then
+                        If Len(acc2) = 0 Then acc2 = got Else acc2 = acc2 & vbLf & got
+                    End If
+                Else
+                    If Len(got) > 0 Then v = got: Exit For
+                End If
             Next
+            If isValue Then v = acc2
             If Len(CStr(v)) > 0 Then BuildValueModeRaw = v: Exit Function
         End If
 CONT_T:
@@ -570,13 +604,13 @@ Private Function SplitArgs(ByVal s As String) As Collection
     For i = 1 To Len(s)
         ch = Mid$(s, i, 1)
         If ch = """" Or ch = "'" Then
-            If InQ Then
-                If ch = qChar Then InQ = False
+            If inQ Then
+                If ch = qChar Then inQ = False
             Else
-                InQ = True: qChar = ch
+                inQ = True: qChar = ch
             End If
             buf = buf & ch
-        ElseIf ch = "," And Not InQ Then
+        ElseIf ch = "," And Not inQ Then
             col.Add Trim$(buf): buf = ""
         Else
             buf = buf & ch
@@ -745,3 +779,4 @@ Private Function FinalizeByType(ByVal s As String, ByVal dataType As String) As 
             FinalizeByType = s
     End Select
 End Function
+
