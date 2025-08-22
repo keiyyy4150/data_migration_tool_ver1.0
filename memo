@@ -1,86 +1,118 @@
-「この範囲は既存のテーブルと整合していないため、機能しません。テーブルには同一の行の見出しが必要であり、１行以上のデータが含まれている必要があります。また、新しい範囲は既存のテーブルと重なっている必要があります」のエラーが出る
+発生しているメッセージは、ListObject.Resize を ヘッダー行だけ に縮めようとした時に、Excel のバージョンや状態によって起きる既知の挙動です（「テーブルには同一の行の見出しが必要で…」のエラー）。
+安全なのは Resize を使わず に「データ行を消す」だけにする方法です。以下のように ClearData を差し替えてください。
 
+エラーの原因（ざっくり）
+	•	masterLo.Resize masterLo.HeaderRowRange のように「ヘッダーだけ」に縮小 → 環境によっては整合性チェックに引っかかる
+	•	フィルタ中／結合セル／外部参照などでも発火しやすい
+
+⸻
+
+安全・高速版 ClearData（Resize 不使用）
 
 '==============================
-' 高速クリア：Masterを空に＆中間データ解放
+' 高速クリア：テーブルのデータ行だけを削除（構造は維持）
 '==============================
 Public Sub ClearData()
     Dim prevCalc As XlCalculation
     Dim prevUpd As Boolean, prevEvt As Boolean, prevDisp As Boolean
-    Dim masterLo As ListObject
     Dim t0 As Double: t0 = Timer
-    
+
+    ' パイプライン未設定なら既定へ
+    If Len(CurrentMasterTableName) = 0 Then UsePipelineMain
+
+    ' アプリ状態を退避＆高速化設定
     On Error Resume Next
-    ' 現在のアプリ状態を退避
     prevUpd = Application.ScreenUpdating
     prevEvt = Application.EnableEvents
     prevDisp = Application.DisplayAlerts
     prevCalc = Application.Calculation
-    ' 速度アップ用フラグをOFF
     Application.ScreenUpdating = False
     Application.EnableEvents = False
     Application.DisplayAlerts = False
     Application.Calculation = xlCalculationManual
     On Error GoTo 0
-    
+
     On Error GoTo EH
-    
-    ' --- Master テーブルを取得（シート名＋テーブル名で安定取得） ---
-    Set masterLo = GetListObjectByName(CurrentMasterTableName)
-    If Not masterLo Is Nothing Then
-        ' フィルタが掛かっていると削除時に遅いことがある → 全表示
+    Dim lo As ListObject
+    Set lo = GetListObjectByName(CurrentMasterTableName)
+    If Not lo Is Nothing Then
+        ' フィルタがかかっていたら解除（削除速度が上がる & エラー回避）
         On Error Resume Next
-        If masterLo.AutoFilter Is Nothing Then
-        Else
-            masterLo.AutoFilter.ShowAllData
-        End If
+        If Not lo.AutoFilter Is Nothing Then lo.AutoFilter.ShowAllData
         On Error GoTo 0
-        
-        ' ★最速：ヘッダだけにリサイズして一発で空にする（書式・列構成は保持）
-        masterLo.Resize masterLo.HeaderRowRange
+
+        ' --- ここがポイント ---
+        ' ● Resize は使わない
+        ' ● データ行を一括削除（構造・列幅・書式は維持）
+        If Not lo.DataBodyRange Is Nothing Then
+            ' 最速：DataBodyRange を Delete（テーブルの行だけ消える）
+            lo.DataBodyRange.Delete
+        End If
+
+        ' 行がない＝空になった状態（Header のみの ListObject）
+        ' 必要ならここで 1 行だけダミーを作ってすぐ削除するワークアラウンドも可
+        ' （古い環境で空テーブル扱いが不安定なら）
+        'If lo.DataBodyRange Is Nothing Then
+        '    lo.ListRows.Add AlwaysInsert:=True
+        '    lo.DataBodyRange.Delete
+        'End If
     End If
-    
-    ' --- 中間の状態フラグとメモリを解放 ---
+
+    ' 中間データの解放（未初期化でも安全に呼べるよう注意）
     HasRaw = False
     IsProcessed = False
-    
-    ' 大きな配列は Erase（未初期化でも安全に呼べるようエラートラップ）
+
     On Error Resume Next
-    If Not (IsEmpty(RawJoined)) Then Erase RawJoined
-    If Not (IsEmpty(m_baseRowIdx)) Then Erase m_baseRowIdx
+    If (Not Not RawJoined) <> 0 Then Erase RawJoined  ' 配列なら解放
+    If (Not Not m_baseRowIdx) <> 0 Then Erase m_baseRowIdx
     On Error GoTo 0
-    
+
     m_baseTblName = ""
-    
-    ' Dictionary や参照を解放（Set = Nothing は O(1) で速い）
     Set TableData = Nothing
     Set KeyIndexSingle = Nothing
     Set KeyIndexMulti = Nothing
-    
-    ' ログ（I/Oも最小限に）
-    WriteLog "INFO", "ClearData: Master cleared & memory freed in " & Format(Timer - t0, "0.00") & "s"
-    
+
+    WriteLog "INFO", "ClearData: cleared in " & Format(Timer - t0, "0.00") & "s"
+
 DONE:
-    ' --- アプリ状態を元に戻す ---
+    ' アプリ状態を戻す
     On Error Resume Next
     Application.ScreenUpdating = prevUpd
     Application.EnableEvents = prevEvt
     Application.DisplayAlerts = prevDisp
     Application.Calculation = prevCalc
     On Error GoTo 0
-    
+
     MsgBox "初期化しました。", vbInformation
     Exit Sub
 
 EH:
-    ' 例外が出てもアプリ状態は必ず戻す
     On Error Resume Next
     Application.ScreenUpdating = prevUpd
     Application.EnableEvents = prevEvt
     Application.DisplayAlerts = prevDisp
     Application.Calculation = prevCalc
     On Error GoTo 0
-    
     WriteLog "ERROR", "ClearData error: " & Err.Number & " " & Err.Description
     MsgBox "ClearDataでエラー: " & Err.Description, vbCritical
 End Sub
+
+さらに安定させる小ワザ（お好みで）
+	•	GetListObjectByName が正しく該当テーブルを返しているか確認（シート名＋テーブル名で取得しているか）。
+例：
+
+Public Function GetListObjectByName(loName As String) As ListObject
+    Dim ws As Worksheet, lo As ListObject
+    For Each ws In ThisWorkbook.Worksheets
+        For Each lo In ws.ListObjects
+            If lo.Name = loName Then Set GetListObjectByName = lo: Exit Function
+        Next lo
+    Next ws
+    Set GetListObjectByName = Nothing
+End Function
+
+
+	•	条件付き書式が大量にあると削除が重くなることがあります。不要分の整理でさらに速くなります。
+
+これで「整合していないため…」のエラーは出なくなり、クリア速度も上がるはずです。
+もしまだ重い／別のエラーが出る場合は、テーブル名・シート名と該当行のスクリーンショット（テキストでもOK）を教えてください。最短で当てるパッチ書きます！
