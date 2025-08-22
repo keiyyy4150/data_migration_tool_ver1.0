@@ -1,66 +1,83 @@
-ありがとうございます！原因は VBA では配列の要素参照に角かっこ [] は使えず、丸かっこ () を使うためです。
-該当箇所 arr[k] を arr(k) に直せばOKです。あわせて、初心者向けにコメントを増やした安全版を置いておきます。
-
-'=== 改行・| 区切りで複数列名を返す（空は除外） ===
-' Mappingの「元カラム」セルに
-'   在庫id
-'   在庫枝番
-' のように改行で複数書く、または「在庫id | 在庫枝番」のように | 区切りで複数書いた場合、
-' それらを1つずつ取り出して Collection にして返します。
-' 余分な空白・BOMを取り除き、空文字は無視します。
-Private Function SafeGetSrcColNames(i As Long, tIdx As Long) As Collection
-    Dim col As New Collection
-
-    ' まずは既存の「単体取得」関数から生文字列をもらう（ここには改行や | が含まれうる）
-    Dim raw As String
-    raw = SafeGetSrcColName(i, tIdx)
-    If Len(raw) = 0 Then
-        Set SafeGetSrcColNames = col
-        Exit Function
-    End If
-
-    ' 区切りの正規化：CRLF / CR を LF に統一し、 | も LF に置換（＝同じ区切りとして扱う）
-    Dim s As String
-    s = Replace$(raw, vbCrLf, vbLf)
-    s = Replace$(s, vbCr, vbLf)
-    s = Replace$(s, "|", vbLf)
-
-    ' 1行ずつ取り出して整形
-    Dim arr() As String
-    Dim k As Long
-    Dim one As String
-
-    arr = Split(s, vbLf)
-    For k = LBound(arr) To UBound(arr)
-        ' ★ 修正点：arr[k] → arr(k)（VBAは丸かっこで参照）
-        one = NormalizeHeader(arr(k))   ' 前後空白やBOMを除去して見出しとして使える形にする
-        If Len(one) > 0 Then
-            col.Add one                 ' 空は無視、値だけ追加
+'==============================
+' 高速クリア：Masterを空に＆中間データ解放
+'==============================
+Public Sub ClearData()
+    Dim prevCalc As XlCalculation
+    Dim prevUpd As Boolean, prevEvt As Boolean, prevDisp As Boolean
+    Dim masterLo As ListObject
+    Dim t0 As Double: t0 = Timer
+    
+    On Error Resume Next
+    ' 現在のアプリ状態を退避
+    prevUpd = Application.ScreenUpdating
+    prevEvt = Application.EnableEvents
+    prevDisp = Application.DisplayAlerts
+    prevCalc = Application.Calculation
+    ' 速度アップ用フラグをOFF
+    Application.ScreenUpdating = False
+    Application.EnableEvents = False
+    Application.DisplayAlerts = False
+    Application.Calculation = xlCalculationManual
+    On Error GoTo 0
+    
+    On Error GoTo EH
+    
+    ' --- Master テーブルを取得（シート名＋テーブル名で安定取得） ---
+    Set masterLo = GetListObjectByName(CurrentMasterTableName)
+    If Not masterLo Is Nothing Then
+        ' フィルタが掛かっていると削除時に遅いことがある → 全表示
+        On Error Resume Next
+        If masterLo.AutoFilter Is Nothing Then
+        Else
+            masterLo.AutoFilter.ShowAllData
         End If
-    Next
-
-    Set SafeGetSrcColNames = col
-End Function
-
-参考：NormalizeHeader（そのままでOK）
-
-'=== 文字列を「ヘッダ用に」正規化（BOM除去＋Trim） ===
-Private Function NormalizeHeader(ByVal s As String) As String
-    If Len(s) = 0 Then
-        NormalizeHeader = ""
-        Exit Function
+        On Error GoTo 0
+        
+        ' ★最速：ヘッダだけにリサイズして一発で空にする（書式・列構成は保持）
+        masterLo.Resize masterLo.HeaderRowRange
     End If
-    s = Replace$(s, ChrW(&HFEFF), "") ' UTF-8 BOM を除去
-    s = Trim$(s)
-    NormalizeHeader = s
-End Function
+    
+    ' --- 中間の状態フラグとメモリを解放 ---
+    HasRaw = False
+    IsProcessed = False
+    
+    ' 大きな配列は Erase（未初期化でも安全に呼べるようエラートラップ）
+    On Error Resume Next
+    If Not (IsEmpty(RawJoined)) Then Erase RawJoined
+    If Not (IsEmpty(m_baseRowIdx)) Then Erase m_baseRowIdx
+    On Error GoTo 0
+    
+    m_baseTblName = ""
+    
+    ' Dictionary や参照を解放（Set = Nothing は O(1) で速い）
+    Set TableData = Nothing
+    Set KeyIndexSingle = Nothing
+    Set KeyIndexMulti = Nothing
+    
+    ' ログ（I/Oも最小限に）
+    WriteLog "INFO", "ClearData: Master cleared & memory freed in " & Format(Timer - t0, "0.00") & "s"
+    
+DONE:
+    ' --- アプリ状態を元に戻す ---
+    On Error Resume Next
+    Application.ScreenUpdating = prevUpd
+    Application.EnableEvents = prevEvt
+    Application.DisplayAlerts = prevDisp
+    Application.Calculation = prevCalc
+    On Error GoTo 0
+    
+    MsgBox "初期化しました。", vbInformation
+    Exit Sub
 
-
-⸻
-
-補足（同様のミスを避けるポイント）
-	•	VBA では 配列・コレクションの要素参照は必ず ()：
-	•	arr(k)、Cells(r, c)、Collection.Item(i)（col(i) でもOK）
-	•	もし他の箇所でも arr[...] のように角かっこが残っていたら、すべて丸かっこに置換してください。
-
-他にもエラーがあれば、その行のコードとメッセージを教えてください。すぐにパッチ作ります！
+EH:
+    ' 例外が出てもアプリ状態は必ず戻す
+    On Error Resume Next
+    Application.ScreenUpdating = prevUpd
+    Application.EnableEvents = prevEvt
+    Application.DisplayAlerts = prevDisp
+    Application.Calculation = prevCalc
+    On Error GoTo 0
+    
+    WriteLog "ERROR", "ClearData error: " & Err.Number & " " & Err.Description
+    MsgBox "ClearDataでエラー: " & Err.Description, vbCritical
+End Sub
