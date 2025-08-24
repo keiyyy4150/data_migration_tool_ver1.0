@@ -12,16 +12,9 @@ Private Function NormalizeHeader(ByVal s As String) As String
 End Function
 
 '=== 改行・| 区切りで複数列名を返す（空は除外） ===
-' Mappingの「元カラム」セルに
-'   在庫id
-'   在庫枝番
-' のように改行で複数書く、または「在庫id | 在庫枝番」のように | 区切りで複数書いた場合、
-' それらを1つずつ取り出して Collection にして返します。
-' 余分な空白・BOMを取り除き、空文字は無視します。
 Private Function SafeGetSrcColNames(i As Long, tIdx As Long) As Collection
     Dim col As New Collection
 
-    ' まずは既存の「単体取得」関数から生文字列をもらう（ここには改行や | が含まれうる）
     Dim raw As String
     raw = SafeGetSrcColName(i, tIdx)
     If Len(raw) = 0 Then
@@ -29,29 +22,20 @@ Private Function SafeGetSrcColNames(i As Long, tIdx As Long) As Collection
         Exit Function
     End If
 
-    ' 区切りの正規化：CRLF / CR を LF に統一し、 | も LF に置換（＝同じ区切りとして扱う）
     Dim s As String
     s = Replace$(raw, vbCrLf, vbLf)
     s = Replace$(s, vbCr, vbLf)
     s = Replace$(s, "|", vbLf)
 
-    ' 1行ずつ取り出して整形
-    Dim arr() As String
-    Dim k As Long
-    Dim one As String
-
+    Dim arr() As String, k As Long, one As String
     arr = Split(s, vbLf)
     For k = LBound(arr) To UBound(arr)
-        ' ★ 修正点：arr[k] → arr(k)（VBAは丸かっこで参照）
-        one = NormalizeHeader(arr(k))   ' 前後空白やBOMを除去して見出しとして使える形にする
-        If Len(one) > 0 Then
-            col.Add one                 ' 空は無視、値だけ追加
-        End If
+        one = NormalizeHeader(arr(k))
+        If Len(one) > 0 Then col.Add one
     Next
 
     Set SafeGetSrcColNames = col
 End Function
-
 
 '=== 列名→列番号（見出し=1行目）
 Private Function Norm(ByVal s As String) As String
@@ -102,14 +86,10 @@ Private Function SafeGetSrcColName(i As Long, tIdx As Long) As String
     lb1 = LBound(Map_SrcCols, 1): ub1 = UBound(Map_SrcCols, 1)
     lb2 = LBound(Map_SrcCols, 2): ub2 = UBound(Map_SrcCols, 2)
 
-    ' tIdx は IndexOfTable の返り値
     Dim tAdj As Long
-    ' 一般的：Map_TblNames が 0始まり、Map_SrcCols 第2次元が 1始まり
-    ' その場合は +1 する
     If lb2 = 1 And LBound(Map_TblNames) = 0 Then
         tAdj = tIdx + 1
     Else
-        ' それ以外は、最小限の補正（必要ならここを調整）
         tAdj = tIdx
     End If
 
@@ -137,7 +117,6 @@ Public Function CollectKeyColIndexesForBase(baseArr As Variant, baseTbl As Strin
         CollectKeyColIndexesForBase = Array(): Exit Function
     End If
  
-    ' 件数カウント
     kc = 0
     For i = LBound(Map_OutCols) To UBound(Map_OutCols)
         If Map_IsKey(i) Then
@@ -293,7 +272,6 @@ Public Function BuildValueModeRaw(colIndex As Long, baseTbl As String, baseRow A
         If names Is Nothing Or names.Count = 0 Then GoTo CONT_T
 
         If Map_TblNames(t) = baseTbl Then
-            ' ===== ベーステーブル：既存どおり、VALUEは複数列を改行連結 =====
             Dim arr As Variant: arr = TableData(baseTbl)
             Dim acc As String: acc = ""
             Dim j As Long, one As String, ci As Long, valStr As String
@@ -386,7 +364,8 @@ Public Function ResolveTokenProcessed(token As String, baseTbl As String, baseRo
     If outColIndex <= 0 Then
         ResolveTokenProcessed = CStr(raw)
     Else
-        ResolveTokenProcessed = ApplyOneValueTransform(raw, Map_DataType(outColIndex), Map_Logic(outColIndex))
+        ' 置換ロジックは廃止。ここでは型変換のみ実施。
+        ResolveTokenProcessed = ApplyOneValueTransform(raw, Map_DataType(outColIndex))
     End If
 End Function
 
@@ -637,7 +616,7 @@ Public Function SplitExprToLines(ByVal def As String) As Collection
 End Function
 
 '==============================
-' 後段の加工（型/置換/数式/IF）
+' 後段の加工（型変換のみ／IFや式はEXPRで）
 '==============================
 Public Function ApplyTransformSmart(src As Variant) As Variant
     Dim rows As Long, cols As Long
@@ -653,7 +632,7 @@ Public Function ApplyTransformSmart(src As Variant) As Variant
                 Case "EXPR"
                     dst(r, c) = EvaluateExpr(Map_Def(c), m_baseTblName, m_baseRowIdx(r), GetKeyForRow(r), True, c)
                 Case Else
-                    dst(r, c) = ApplyOneValueTransform(src(r, c), Map_DataType(c), Map_Logic(c))
+                    dst(r, c) = ApplyOneValueTransform(src(r, c), Map_DataType(c))
             End Select
         Next
     Next
@@ -669,23 +648,15 @@ Private Function GetKeyForRow(r As Long) As String
 End Function
 
 '==============================
-' 単値の型/置換
+' 単値の型変換のみ（ロジック置換は廃止）
 '==============================
-Public Function ApplyOneValueTransform(v As Variant, dataType As String, logic As String) As String
+Public Function ApplyOneValueTransform(v As Variant, dataType As String) As String
     Dim w As Variant: w = v
     Select Case UCase$(dataType)
         Case "NUMBER": If Len(CStr(w)) > 0 And IsNumeric(w) Then w = CLng(w) Else w = ""
         Case "DATE":   If Len(CStr(w)) > 0 And IsDate(w) Then w = Format$(CDate(w), "yyyy/mm/dd") Else w = ""
         Case Else:     w = CStr(w)
     End Select
-    If Len(logic) > 0 Then
-        Dim rules() As String, i As Long, pair() As String
-        rules = Split(logic, ";")
-        For i = LBound(rules) To UBound(rules)
-            pair = Split(rules(i), "→")
-            If UBound(pair) = 1 Then w = Replace(CStr(w), pair(0), pair(1))
-        Next
-    End If
     ApplyOneValueTransform = CStr(w)
 End Function
 
@@ -779,4 +750,3 @@ Private Function FinalizeByType(ByVal s As String, ByVal dataType As String) As 
             FinalizeByType = s
     End Select
 End Function
-
