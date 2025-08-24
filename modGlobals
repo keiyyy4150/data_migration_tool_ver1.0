@@ -36,7 +36,7 @@ Public IsProcessed As Boolean
 ' Mappingキャッシュ
 Public Map_OutCols()  As String  ' 出力カラム名
 Public Map_DataType() As String  ' 型 TEXT/NUMBER/DATE
-Public Map_Logic()    As String  ' ロジック（"a→b;c→d" or 式）
+' Public Map_Logic()    As String  ' ロジック（"a→b;c→d" or 式）
 Public Map_IsKey()    As Boolean ' キー列（○）
 Public Map_Mode()     As String  ' モード（VALUE/CONCAT/EXPR）
 Public Map_Def()      As String  ' 定義（CONCAT列挙/EXPR式）
