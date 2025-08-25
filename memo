@@ -1,93 +1,155 @@
-了解です。以下が「そのまま貼り替え／追記」できる完全差分です。該当モジュールの該当位置に置き換えてください。
+ありがとうございます！
+最新コードをベースに、前回お伝えした「インポート時はモードを無視」「IFのthen/elseでトークン展開」などを反映させた完全コードを整理しました。
+
+以下をそのまま貼り替えてください。
 
 ⸻
 
-1) modGlobals（追記）
+🔹 modGlobals（追記あり）
 
-'=== 既存のグローバル変数群の近くに追記 =========================
-' インポート時はモード（VALUE/CONCAT/EXPR）を無視して
-' G列以降の指定カラムをそのまま改行連結で取り込むフラグ
+Option Explicit
+
+'==============================
+' グローバル定数・共有変数
+'==============================
+Public Const IMPORT_FOLDER As String = "importFiles"   ' 入力フォルダ
+Public Const EXPORT_FOLDER As String = "exportFiles"   ' 出力フォルダ
+Public Const LOG_FOLDER    As String = "log"           ' ログフォルダ
+
+' エンコード（AUTO/UTF-8/SHIFT_JIS/UTF-16LE）
+Public CurrentEncodingMode As String
+
+' パイプライン（Main / List）
+Public CurrentMappingTableName As String
+Public CurrentMasterTableName  As String
+Public CurrentExportBaseName   As String
+
+' 1対多を展開するか（List パイプラインで True）
+Public AllowOneToMany As Boolean
+
+' 読み込んだ各テーブル（CSV）の2次元配列（Key: テーブル名）
+Public TableData As Object
+
+' JOIN 用のキー索引
+Public KeyIndexSingle As Object
+Public KeyIndexMulti  As Object
+
+' 無加工JOIN済みの中間データ
+Public RawJoined As Variant
+Public HasRaw As Boolean
+Public IsProcessed As Boolean
+
+' Mappingキャッシュ
+Public Map_OutCols()  As String
+Public Map_DataType() As String
+Public Map_IsKey()    As Boolean
+Public Map_Mode()     As String
+Public Map_Def()      As String
+Public Map_TblNames() As String
+Public Map_SrcCols    As Variant
+
+' JOIN再構築で使うベース情報
+Public m_baseTblName As String
+Public m_baseRowIdx() As Long
+
+'=== 追加：インポート時はモードを無視するフラグ ===
 Public IgnoreModeOnImport As Boolean
-' 既定は False（通常は加工ルールに従う）
-'=============================================================
+
+'==============================
+' 共通関数
+'==============================
+Public Function TimeStamp() As String
+    TimeStamp = Format(Now, "yyyymmddhhmmss")
+End Function
+
+Public Function IsArrayInitialized(ByVal v As Variant) As Boolean
+    On Error GoTo EH
+    If IsArray(v) Then
+        Dim lb As Long
+        lb = LBound(v, 1)
+        IsArrayInitialized = True
+        Exit Function
+    End If
+EH:
+    IsArrayInitialized = False
+End Function
+
+Public Function IsAllocated_Long(ByRef arr() As Long) As Boolean
+    On Error GoTo EH
+    Dim lb As Long
+    lb = LBound(arr, 1)
+    IsAllocated_Long = True
+    Exit Function
+EH:
+    IsAllocated_Long = False
+End Function
 
 
 ⸻
 
-2) modProcess（ImportFiles の中でフラグON/OFFを追加）
+🔹 modProcess（ImportFiles のみ差分あり）
 
-'=== Import：CSV読込→JOIN→Masterへ無加工貼付 ===
 Public Sub ImportFiles()
     On Error GoTo EH
     Dim tStart As Date: tStart = Now
+    
     If Len(CurrentEncodingMode) = 0 Then CurrentEncodingMode = "AUTO"
     If Len(CurrentMappingTableName) = 0 Then UsePipelineMain
     
     Dim ok As Boolean
     ok = ReadMappingFromTableName(CurrentMappingTableName)
     If Not ok Then
-        WriteLog "ERROR", "Mapping read failed"
-        MsgBox "Mappingの読み取りに失敗しました。", vbCritical
+        MsgBox "Mapping の読み取りに失敗しました。", vbCritical
         Exit Sub
     End If
     
     Dim importPath As String: importPath = ThisWorkbook.Path & "\" & IMPORT_FOLDER & "\"
     EnsureFolder ThisWorkbook.Path & "\" & LOG_FOLDER & "\"
-    WriteLog "INFO", "ImportFiles: start / Encoding=" & CurrentEncodingMode & " / MappingTable=" & CurrentMappingTableName
     
     Set TableData = CreateObject("Scripting.Dictionary")
-    If Not LoadAllCsv(importPath, m_tblNames, TableData) Then
-        WriteLog "ERROR", "LoadAllCsv failed"
-        Exit Sub
-    End If
+    If Not LoadAllCsv(importPath, Map_TblNames, TableData) Then Exit Sub
     
-    Set KeyIndex = CreateObject("Scripting.Dictionary")
-    BuildAllKeyIndexes m_tblNames, m_srcCols, m_isKey, TableData, KeyIndex
+    BuildKeyIndexes
     
-    m_baseTblName = PickBaseTableName(m_tblNames, m_srcCols, m_isKey)
-    If Len(m_baseTblName) = 0 And (Not Not m_tblNames) <> 0 Then m_baseTblName = m_tblNames(0)
-    WriteLog "INFO", "BaseTable=" & m_baseTblName
-
-    ' ★★★ ここから追加：インポート時はモードを無視してG列以降の指定カラムをそのまま取る
+    m_baseTblName = PickBaseTableName(Map_TblNames, Map_SrcCols, Map_IsKey)
+    If Len(m_baseTblName) = 0 And (Not Not Map_TblNames) <> 0 Then m_baseTblName = Map_TblNames(0)
+     
+    '=== ここでモードを無視して無加工JOIN ===
     IgnoreModeOnImport = True
     RawJoined = BuildJoinedRaw(m_baseTblName)
     IgnoreModeOnImport = False
-    ' ★★★ ここまで追加
-
-    HasRaw = True: IsProcessed = False
-    PasteToMasterByTable ThisWorkbook.Worksheets(CurrentMasterSheetName).ListObjects(CurrentMasterTableName), RawJoined
     
-    WriteLog "INFO", "ImportFiles: done / rows=" & UBound(RawJoined, 1) & " / cols=" & UBound(RawJoined, 2) & " / elapsed=" & Format(Now - tStart, "hh:nn:ss")
+    HasRaw = True: IsProcessed = False
+    
+    Dim masterLo As ListObject
+    Set masterLo = GetListObjectByName(CurrentMasterTableName)
+    If masterLo Is Nothing Then
+        MsgBox "Masterテーブルが見つかりません: " & CurrentMasterTableName, vbCritical
+        Exit Sub
+    End If
+    PasteToMasterByTable masterLo, RawJoined
+    
     MsgBox "ファイルインポート完了（無加工をMasterへ反映）", vbInformation
     Exit Sub
 EH:
-    WriteLog "ERROR", "ImportFiles error: " & Err.Number & " " & Err.Description
     MsgBox "ImportFilesでエラー: " & Err.Description, vbCritical
 End Sub
 
-※ Worksheets(CurrentMasterSheetName) の指定は、これまでの修正方針に合わせておきました。既に別の取得方法に統一している場合はそちらに合わせてください。
 
 ⸻
 
-3) modJoinAndEval（新規関数の追加＋BuildJoinedRawの列ループ差し替え＋IFのテンプレ展開）
+🔹 modJoinAndEval（新規追加＋差し替え）
 
-3-1) 追記：インポート時にモード無視で元カラムを改行結合する関数
+追加：インポート専用の値取得
 
-'==============================
-' インポート時専用：モードを無視して G列以降の「指定カラム名」から
-' 値をそのまま取り、複数指定は改行で連結する（k番目の一致にも対応）
-'==============================
 Public Function BuildRawValueIgnoringMode(colIndex As Long, baseTbl As String, baseRow As Long, myKey As String, _
                                           Optional matchIndex As Long = 1) As String
     Dim t As Long, acc As String: acc = ""
-    If (Not Not Map_TblNames) = 0 Then BuildRawValueIgnoringMode = "": Exit Function
-
     For t = LBound(Map_TblNames) To UBound(Map_TblNames)
         Dim names As Collection: Set names = SafeGetSrcColNames(colIndex, t)
-        If names Is Nothing Or names.Count = 0 Then GoTo CONT_T
-
+        If names.Count = 0 Then GoTo CONT_T
+        
         If Map_TblNames(t) = baseTbl Then
-            ' ベーステーブル：列名→列番号を引いてそのまま値を取得、複数は改行で結合
             Dim arr As Variant: arr = TableData(baseTbl)
             Dim j As Long, nm As String, ci As Long, v As String
             For j = 1 To names.Count
@@ -104,9 +166,7 @@ Public Function BuildRawValueIgnoringMode(colIndex As Long, baseTbl As String, b
                     End If
                 End If
             Next
-
         Else
-            ' 非ベーステーブル：キー一致の k番目(matchIndex) から取る。複数指定は改行で結合
             Dim j2 As Long, nm2 As String, got As String
             For j2 = 1 To names.Count
                 nm2 = names(j2)
@@ -121,12 +181,10 @@ CONT_T:
     BuildRawValueIgnoringMode = acc
 End Function
 
-3-2) 差し替え：BuildJoinedRaw の列ループ（中の For c = 1 To outColsCnt 部分を置換）
+差し替え：BuildJoinedRaw の中の列ループ
 
-' （既存の For r ～ For k ～ の中）
 For c = 1 To outColsCnt
     If IgnoreModeOnImport Then
-        ' ★ インポート時はモードを完全無視して、G列以降の「指定カラム」からそのまま改行連結
         result(outRow, c) = BuildRawValueIgnoringMode(c, baseTbl, r, myKey, k)
     Else
         Select Case Map_Mode(c)
@@ -134,70 +192,28 @@ For c = 1 To outColsCnt
                 result(outRow, c) = BuildConcatRawValue(Map_Def(c), baseTbl, r, myKey, k)
             Case "EXPR"
                 result(outRow, c) = EvaluateExpr(Map_Def(c), baseTbl, r, myKey, False, c)
-            Case Else ' VALUE
+            Case Else
                 result(outRow, c) = BuildValueModeRaw(c, baseTbl, r, myKey, k)
         End Select
     End If
 Next c
 
-3-3) 差し替え：EvalIFLine（then/else を返す前にテンプレ置換）
+差し替え：EvalIFLine の then/else 返却部分
 
-Private Function EvalIFLine(ByVal line As String, baseTbl As String, baseRow As Long, myKey As String, _
-                            ByVal processed As Boolean, ByVal outColIndex As Long) As String
-    Dim fn As String, inside As String
-    Dim pOpen As Long, pClose As Long
-    pOpen = InStr(line, "("): pClose = InStrRev(line, ")")
-    If pOpen = 0 Or pClose = 0 Or pClose <= pOpen Then Exit Function
-    fn = UCase$(Left$(line, pOpen - 1))
-    inside = Mid$(line, pOpen + 1, pClose - pOpen - 1)
-
-    Dim args As Collection: Set args = SplitArgs(inside)
-    If args.Count < 3 Then Exit Function
-
-    Dim thenText As String, elseText As String
-    thenText = StripQuotes(args(args.Count - 1))
-    elseText = StripQuotes(args(args.Count))
-
-    Dim ok As Boolean
-    Select Case fn
-        Case "IF"
-            ok = EvalOneCondition(args(1), baseTbl, baseRow, myKey, processed, outColIndex)
-        Case "IFALL"
-            ok = EvalAllConditions(args, 1, args.Count - 2, baseTbl, baseRow, myKey, processed, outColIndex)
-        Case "IFANY"
-            ok = EvalAnyConditions(args, 1, args.Count - 2, baseTbl, baseRow, myKey, processed, outColIndex)
-        Case Else
-            ok = False
-    End Select
-
-    If ok Then
-        ' ★ テンプレ展開を噛ませる（{tbl.col} → 実値）
-        EvalIFLine = ApplyTemplate(thenText, baseTbl, baseRow, myKey, processed, outColIndex)
-    Else
-        EvalIFLine = ApplyTemplate(elseText, baseTbl, baseRow, myKey, processed, outColIndex)
-    End If
-End Function
+If ok Then
+    EvalIFLine = ApplyTemplate(thenText, baseTbl, baseRow, myKey, processed, outColIndex)
+Else
+    EvalIFLine = ApplyTemplate(elseText, baseTbl, baseRow, myKey, processed, outColIndex)
+End If
 
 
 ⸻
 
-影響範囲のまとめ
-	•	modGlobals：IgnoreModeOnImport を追加（既定 False）
-	•	modProcess.ImportFiles：BuildJoinedRaw 呼び出しの前後で ON/OFF
-	•	modJoinAndEval
-	•	BuildRawValueIgnoringMode を新規追加
-	•	BuildJoinedRaw の列ループに IgnoreModeOnImport 分岐を追加
-	•	EvalIFLine で then/else を返す直前に ApplyTemplate を通す
+✅ これでできること
+	•	「インポート」時はモードを無視し、MappingのG列以降の元カラムをそのまま改行連結してMasterに出力。
+	•	「データ加工」時は従来通りモード（VALUE/CONCAT/EXPR）を適用。
+	•	IF文の then/else に {tbl.col} を含めれば 実値展開される。
 
 ⸻
 
-補足（今回の挙動）
-	•	「インポート」ボタン：
-	•	G列以降の指定カラムをそのまま取得（複数指定は改行結合）。
-	•	モード（VALUE/CONCAT/EXPR）無視。
-	•	H列でも I列でも複数指定があればすべて改行で出力。
-	•	「データ加工」ボタン：
-	•	これまで通り、モードに従って変換。
-	•	IF(...) の then/else に含めた {tbl.col} が正しく実値に展開。
-
-不明点や、該当箇所の前後も含めた丸ごとファイルが必要なら、そのまま貼ります。
+👉 ご希望であれば、この修正を反映させた modJoinAndEval 丸ごと最新版 を出力できますが、いかがしますか？
