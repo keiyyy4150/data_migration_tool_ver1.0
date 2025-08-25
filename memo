@@ -1,149 +1,203 @@
-ありがとうございます！3点まとめて直します。
+了解です。以下が「そのまま貼り替え／追記」できる完全差分です。該当モジュールの該当位置に置き換えてください。
 
 ⸻
 
-① SEQ に「値がある時だけ “R” を付ける」書き方
+1) modGlobals（追記）
 
-該当行（出力カラム=SEQ）の モード=EXPR、定義 を下記1行にしてください。
+'=== 既存のグローバル変数群の近くに追記 =========================
+' インポート時はモード（VALUE/CONCAT/EXPR）を無視して
+' G列以降の指定カラムをそのまま改行連結で取り込むフラグ
+Public IgnoreModeOnImport As Boolean
+' 既定は False（通常は加工ルールに従う）
+'=============================================================
 
-IF({pcm_t_コンプラ相談.SEQ}="","", "R{pcm_t_コンプラ相談.SEQ}")
-
-	•	値が空なら ""（空文字）
-	•	値が入っていれば Rxxxx を返します
-
-⸻
-
-② 「インポート」時はモード無視で G列以降の指定カラムを無加工で取る
-
-変更点（コード）
-
-modJoinAndEval の BuildJoinedRaw を「常に無加工（VALUE相当）」で集めるようにします。
-以下のように、Select Case Map_Mode(c) を使わず 毎回 BuildValueModeRaw を呼ぶだけにしてください。
-
-'==============================
-' BuildJoinedRaw（無加工）※ Listパイプラインは1対多で行複製
-'==============================
-Public Function BuildJoinedRaw(baseTbl As String) As Variant
-    Dim outColsCnt As Long
-    outColsCnt = UBound(Map_OutCols) - LBound(Map_OutCols) + 1
-
-    Dim baseArr As Variant
-    Dim haveBase As Boolean: haveBase = (Len(baseTbl) > 0)
-    Dim baseKeyCols() As Long
-
-    Dim totalRows As Long, r As Long, myKey As String
-    Dim expand As Long, k As Long, c As Long
-
-    If Not haveBase Then
-        Dim emptyArr() As Variant
-        ReDim emptyArr(1 To 1, 1 To outColsCnt)
-        BuildJoinedRaw = emptyArr
-        Exit Function
-    End If
-
-    baseArr = TableData(baseTbl)
-    baseKeyCols = CollectKeyColIndexesForBase(baseArr, baseTbl)
-
-    ' 行数見積り
-    totalRows = 0
-    For r = 2 To UBound(baseArr, 1)
-        myKey = BuildKeyFromRow(baseArr, r, baseKeyCols)
-        expand = 1
-        If AllowOneToMany Then
-            expand = MaxMatchesForKey(myKey, baseTbl)
-            If expand < 1 Then expand = 1
-        End If
-        totalRows = totalRows + expand
-    Next
-
-    If totalRows = 0 Then
-        Dim empty2() As Variant
-        ReDim empty2(1 To 1, 1 To outColsCnt)
-        BuildJoinedRaw = empty2
-        Exit Function
-    End If
-
-    Dim result() As Variant
-    ReDim result(1 To totalRows, 1 To outColsCnt)
-    ReDim m_baseRowIdx(1 To totalRows)
-
-    ' 実データ埋め（常に無加工：モードは無視）
-    Dim outRow As Long: outRow = 0
-    For r = 2 To UBound(baseArr, 1)
-        myKey = BuildKeyFromRow(baseArr, r, baseKeyCols)
-        expand = 1
-        If AllowOneToMany Then
-            expand = MaxMatchesForKey(myKey, baseTbl)
-            If expand < 1 Then expand = 1
-        End If
-        For k = 1 To expand
-            outRow = outRow + 1
-            m_baseRowIdx(outRow) = r
-            For c = 1 To outColsCnt
-                result(outRow, c) = BuildValueModeRaw(c, baseTbl, r, myKey, k)
-            Next c
-        Next k
-    Next r
-
-    BuildJoinedRaw = result
-End Function
-
-こうしておくと、「インポート」＝無加工（G列以降の元カラム指定を改行でそのまま連結）、
-「データ加工」＝モード（VALUE/EXPR/CONCAT）を使って変換 という住み分けができます。
 
 ⸻
 
-③ Master に1行余計に出る（範囲が1行多い）
+2) modProcess（ImportFiles の中でフラグON/OFFを追加）
 
-テーブルのリサイズ手順を 「一度ヘッダだけに縮めてから、ちょうどの行数に広げる」 方式にすると解消します。
-
-変更点（コード）
-
-modProcess の PasteToMasterByTable を下記に置き換えてください。
-
-'=== Masterへ貼付（テーブル名で厳密リサイズ） ===
-Public Sub PasteToMasterByTable(masterTbl As ListObject, dataArr As Variant)
-    Dim rows As Long, cols As Long
-    rows = UBound(dataArr, 1): cols = UBound(dataArr, 2)
-
-    ' 列数チェック
-    If masterTbl.ListColumns.Count <> cols Then
-        WriteLog "ERROR", "Master columns mismatch. Master=" & masterTbl.ListColumns.Count & " Mapping=" & cols
-        MsgBox "Masterテーブルの列数がMappingの出力列数と一致しません。", vbCritical
+'=== Import：CSV読込→JOIN→Masterへ無加工貼付 ===
+Public Sub ImportFiles()
+    On Error GoTo EH
+    Dim tStart As Date: tStart = Now
+    If Len(CurrentEncodingMode) = 0 Then CurrentEncodingMode = "AUTO"
+    If Len(CurrentMappingTableName) = 0 Then UsePipelineMain
+    
+    Dim ok As Boolean
+    ok = ReadMappingFromTableName(CurrentMappingTableName)
+    If Not ok Then
+        WriteLog "ERROR", "Mapping read failed"
+        MsgBox "Mappingの読み取りに失敗しました。", vbCritical
         Exit Sub
     End If
-
-    ' 1) ヘッダだけに一旦縮める（既存の余分な行を確実に消す）
-    masterTbl.Resize masterTbl.HeaderRowRange.Resize(1, cols)
-
-    ' 2) 目的の行数＋ヘッダに広げる
-    masterTbl.Resize masterTbl.HeaderRowRange.Resize(rows + 1, cols)
-
-    ' 3) 値を流し込み
-    masterTbl.DataBodyRange.Value = dataArr
-
-    ' 4) 念のため、最後の行が完全に空なら1行縮める（空配列のときの保険）
-    On Error Resume Next
-    If Application.WorksheetFunction.CountA(masterTbl.ListRows(masterTbl.ListRows.Count).Range) = 0 _
-       And masterTbl.ListRows.Count > 1 Then
-        masterTbl.Resize masterTbl.HeaderRowRange.Resize(masterTbl.ListRows.Count, cols)
+    
+    Dim importPath As String: importPath = ThisWorkbook.Path & "\" & IMPORT_FOLDER & "\"
+    EnsureFolder ThisWorkbook.Path & "\" & LOG_FOLDER & "\"
+    WriteLog "INFO", "ImportFiles: start / Encoding=" & CurrentEncodingMode & " / MappingTable=" & CurrentMappingTableName
+    
+    Set TableData = CreateObject("Scripting.Dictionary")
+    If Not LoadAllCsv(importPath, m_tblNames, TableData) Then
+        WriteLog "ERROR", "LoadAllCsv failed"
+        Exit Sub
     End If
-    On Error GoTo 0
+    
+    Set KeyIndex = CreateObject("Scripting.Dictionary")
+    BuildAllKeyIndexes m_tblNames, m_srcCols, m_isKey, TableData, KeyIndex
+    
+    m_baseTblName = PickBaseTableName(m_tblNames, m_srcCols, m_isKey)
+    If Len(m_baseTblName) = 0 And (Not Not m_tblNames) <> 0 Then m_baseTblName = m_tblNames(0)
+    WriteLog "INFO", "BaseTable=" & m_baseTblName
+
+    ' ★★★ ここから追加：インポート時はモードを無視してG列以降の指定カラムをそのまま取る
+    IgnoreModeOnImport = True
+    RawJoined = BuildJoinedRaw(m_baseTblName)
+    IgnoreModeOnImport = False
+    ' ★★★ ここまで追加
+
+    HasRaw = True: IsProcessed = False
+    PasteToMasterByTable ThisWorkbook.Worksheets(CurrentMasterSheetName).ListObjects(CurrentMasterTableName), RawJoined
+    
+    WriteLog "INFO", "ImportFiles: done / rows=" & UBound(RawJoined, 1) & " / cols=" & UBound(RawJoined, 2) & " / elapsed=" & Format(Now - tStart, "hh:nn:ss")
+    MsgBox "ファイルインポート完了（無加工をMasterへ反映）", vbInformation
+    Exit Sub
+EH:
+    WriteLog "ERROR", "ImportFiles error: " & Err.Number & " " & Err.Description
+    MsgBox "ImportFilesでエラー: " & Err.Description, vbCritical
 End Sub
 
-これで「前回の行が残って1行多い」や「最終行が空なのに残る」ケースを避けられます。
+※ Worksheets(CurrentMasterSheetName) の指定は、これまでの修正方針に合わせておきました。既に別の取得方法に統一している場合はそちらに合わせてください。
 
 ⸻
 
-参考：挙動の整理
-	•	インポート
-	•	BuildJoinedRaw ＝ 常に無加工（G列以降の指定カラムから値を取得。複数指定は改行連結）
-	•	Master はそのまま表示
-	•	データ加工
-	•	ApplyTransformSmart で EXPR/CONCAT/VALUE を解釈して加工後を再出力
-	•	CSV出力
-	•	これまで通り（ファイル名分岐の修正を入れている場合はその仕様に追従）
+3) modJoinAndEval（新規関数の追加＋BuildJoinedRawの列ループ差し替え＋IFのテンプレ展開）
+
+3-1) 追記：インポート時にモード無視で元カラムを改行結合する関数
+
+'==============================
+' インポート時専用：モードを無視して G列以降の「指定カラム名」から
+' 値をそのまま取り、複数指定は改行で連結する（k番目の一致にも対応）
+'==============================
+Public Function BuildRawValueIgnoringMode(colIndex As Long, baseTbl As String, baseRow As Long, myKey As String, _
+                                          Optional matchIndex As Long = 1) As String
+    Dim t As Long, acc As String: acc = ""
+    If (Not Not Map_TblNames) = 0 Then BuildRawValueIgnoringMode = "": Exit Function
+
+    For t = LBound(Map_TblNames) To UBound(Map_TblNames)
+        Dim names As Collection: Set names = SafeGetSrcColNames(colIndex, t)
+        If names Is Nothing Or names.Count = 0 Then GoTo CONT_T
+
+        If Map_TblNames(t) = baseTbl Then
+            ' ベーステーブル：列名→列番号を引いてそのまま値を取得、複数は改行で結合
+            Dim arr As Variant: arr = TableData(baseTbl)
+            Dim j As Long, nm As String, ci As Long, v As String
+            For j = 1 To names.Count
+                nm = names(j)
+                If IsNumeric(nm) Then
+                    ci = CLng(nm)
+                Else
+                    ci = FindColumnIndex(arr, nm)
+                End If
+                If ci > 0 Then
+                    v = CStr(arr(baseRow, ci))
+                    If Len(v) > 0 Then
+                        If Len(acc) = 0 Then acc = v Else acc = acc & vbLf & v
+                    End If
+                End If
+            Next
+
+        Else
+            ' 非ベーステーブル：キー一致の k番目(matchIndex) から取る。複数指定は改行で結合
+            Dim j2 As Long, nm2 As String, got As String
+            For j2 = 1 To names.Count
+                nm2 = names(j2)
+                got = GetValueFromTableMulti(Map_TblNames(t), nm2, myKey, matchIndex)
+                If Len(got) > 0 Then
+                    If Len(acc) = 0 Then acc = got Else acc = acc & vbLf & got
+                End If
+            Next
+        End If
+CONT_T:
+    Next
+    BuildRawValueIgnoringMode = acc
+End Function
+
+3-2) 差し替え：BuildJoinedRaw の列ループ（中の For c = 1 To outColsCnt 部分を置換）
+
+' （既存の For r ～ For k ～ の中）
+For c = 1 To outColsCnt
+    If IgnoreModeOnImport Then
+        ' ★ インポート時はモードを完全無視して、G列以降の「指定カラム」からそのまま改行連結
+        result(outRow, c) = BuildRawValueIgnoringMode(c, baseTbl, r, myKey, k)
+    Else
+        Select Case Map_Mode(c)
+            Case "CONCAT"
+                result(outRow, c) = BuildConcatRawValue(Map_Def(c), baseTbl, r, myKey, k)
+            Case "EXPR"
+                result(outRow, c) = EvaluateExpr(Map_Def(c), baseTbl, r, myKey, False, c)
+            Case Else ' VALUE
+                result(outRow, c) = BuildValueModeRaw(c, baseTbl, r, myKey, k)
+        End Select
+    End If
+Next c
+
+3-3) 差し替え：EvalIFLine（then/else を返す前にテンプレ置換）
+
+Private Function EvalIFLine(ByVal line As String, baseTbl As String, baseRow As Long, myKey As String, _
+                            ByVal processed As Boolean, ByVal outColIndex As Long) As String
+    Dim fn As String, inside As String
+    Dim pOpen As Long, pClose As Long
+    pOpen = InStr(line, "("): pClose = InStrRev(line, ")")
+    If pOpen = 0 Or pClose = 0 Or pClose <= pOpen Then Exit Function
+    fn = UCase$(Left$(line, pOpen - 1))
+    inside = Mid$(line, pOpen + 1, pClose - pOpen - 1)
+
+    Dim args As Collection: Set args = SplitArgs(inside)
+    If args.Count < 3 Then Exit Function
+
+    Dim thenText As String, elseText As String
+    thenText = StripQuotes(args(args.Count - 1))
+    elseText = StripQuotes(args(args.Count))
+
+    Dim ok As Boolean
+    Select Case fn
+        Case "IF"
+            ok = EvalOneCondition(args(1), baseTbl, baseRow, myKey, processed, outColIndex)
+        Case "IFALL"
+            ok = EvalAllConditions(args, 1, args.Count - 2, baseTbl, baseRow, myKey, processed, outColIndex)
+        Case "IFANY"
+            ok = EvalAnyConditions(args, 1, args.Count - 2, baseTbl, baseRow, myKey, processed, outColIndex)
+        Case Else
+            ok = False
+    End Select
+
+    If ok Then
+        ' ★ テンプレ展開を噛ませる（{tbl.col} → 実値）
+        EvalIFLine = ApplyTemplate(thenText, baseTbl, baseRow, myKey, processed, outColIndex)
+    Else
+        EvalIFLine = ApplyTemplate(elseText, baseTbl, baseRow, myKey, processed, outColIndex)
+    End If
+End Function
+
 
 ⸻
 
-必要なら、該当モジュールの差分をコピペ用にもう少し展開して渡します。どうします？
+影響範囲のまとめ
+	•	modGlobals：IgnoreModeOnImport を追加（既定 False）
+	•	modProcess.ImportFiles：BuildJoinedRaw 呼び出しの前後で ON/OFF
+	•	modJoinAndEval
+	•	BuildRawValueIgnoringMode を新規追加
+	•	BuildJoinedRaw の列ループに IgnoreModeOnImport 分岐を追加
+	•	EvalIFLine で then/else を返す直前に ApplyTemplate を通す
+
+⸻
+
+補足（今回の挙動）
+	•	「インポート」ボタン：
+	•	G列以降の指定カラムをそのまま取得（複数指定は改行結合）。
+	•	モード（VALUE/CONCAT/EXPR）無視。
+	•	H列でも I列でも複数指定があればすべて改行で出力。
+	•	「データ加工」ボタン：
+	•	これまで通り、モードに従って変換。
+	•	IF(...) の then/else に含めた {tbl.col} が正しく実値に展開。
+
+不明点や、該当箇所の前後も含めた丸ごとファイルが必要なら、そのまま貼ります。
