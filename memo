@@ -1,8 +1,149 @@
-以下の問題がありました。
+ありがとうございます！3点まとめて直します。
 
-①SEQ（先頭に “R” を付与）について、値がある場合のみ先頭にQをつけるようにしたい
+⸻
 
-②「インポート」ボタン押下時の挙動は、モードを無視してG列以降の指定カラムの値をそのままとるようにしたい（改行で複数入っていればマスターにも改行で表示）
-モードを見るのは「データ加工」押下時のみ
+① SEQ に「値がある時だけ “R” を付ける」書き方
 
-③Masterシートに表示されるデータが、実データに対して１行多い（テーブルの範囲が１行実データより多い」
+該当行（出力カラム=SEQ）の モード=EXPR、定義 を下記1行にしてください。
+
+IF({pcm_t_コンプラ相談.SEQ}="","", "R{pcm_t_コンプラ相談.SEQ}")
+
+	•	値が空なら ""（空文字）
+	•	値が入っていれば Rxxxx を返します
+
+⸻
+
+② 「インポート」時はモード無視で G列以降の指定カラムを無加工で取る
+
+変更点（コード）
+
+modJoinAndEval の BuildJoinedRaw を「常に無加工（VALUE相当）」で集めるようにします。
+以下のように、Select Case Map_Mode(c) を使わず 毎回 BuildValueModeRaw を呼ぶだけにしてください。
+
+'==============================
+' BuildJoinedRaw（無加工）※ Listパイプラインは1対多で行複製
+'==============================
+Public Function BuildJoinedRaw(baseTbl As String) As Variant
+    Dim outColsCnt As Long
+    outColsCnt = UBound(Map_OutCols) - LBound(Map_OutCols) + 1
+
+    Dim baseArr As Variant
+    Dim haveBase As Boolean: haveBase = (Len(baseTbl) > 0)
+    Dim baseKeyCols() As Long
+
+    Dim totalRows As Long, r As Long, myKey As String
+    Dim expand As Long, k As Long, c As Long
+
+    If Not haveBase Then
+        Dim emptyArr() As Variant
+        ReDim emptyArr(1 To 1, 1 To outColsCnt)
+        BuildJoinedRaw = emptyArr
+        Exit Function
+    End If
+
+    baseArr = TableData(baseTbl)
+    baseKeyCols = CollectKeyColIndexesForBase(baseArr, baseTbl)
+
+    ' 行数見積り
+    totalRows = 0
+    For r = 2 To UBound(baseArr, 1)
+        myKey = BuildKeyFromRow(baseArr, r, baseKeyCols)
+        expand = 1
+        If AllowOneToMany Then
+            expand = MaxMatchesForKey(myKey, baseTbl)
+            If expand < 1 Then expand = 1
+        End If
+        totalRows = totalRows + expand
+    Next
+
+    If totalRows = 0 Then
+        Dim empty2() As Variant
+        ReDim empty2(1 To 1, 1 To outColsCnt)
+        BuildJoinedRaw = empty2
+        Exit Function
+    End If
+
+    Dim result() As Variant
+    ReDim result(1 To totalRows, 1 To outColsCnt)
+    ReDim m_baseRowIdx(1 To totalRows)
+
+    ' 実データ埋め（常に無加工：モードは無視）
+    Dim outRow As Long: outRow = 0
+    For r = 2 To UBound(baseArr, 1)
+        myKey = BuildKeyFromRow(baseArr, r, baseKeyCols)
+        expand = 1
+        If AllowOneToMany Then
+            expand = MaxMatchesForKey(myKey, baseTbl)
+            If expand < 1 Then expand = 1
+        End If
+        For k = 1 To expand
+            outRow = outRow + 1
+            m_baseRowIdx(outRow) = r
+            For c = 1 To outColsCnt
+                result(outRow, c) = BuildValueModeRaw(c, baseTbl, r, myKey, k)
+            Next c
+        Next k
+    Next r
+
+    BuildJoinedRaw = result
+End Function
+
+こうしておくと、「インポート」＝無加工（G列以降の元カラム指定を改行でそのまま連結）、
+「データ加工」＝モード（VALUE/EXPR/CONCAT）を使って変換 という住み分けができます。
+
+⸻
+
+③ Master に1行余計に出る（範囲が1行多い）
+
+テーブルのリサイズ手順を 「一度ヘッダだけに縮めてから、ちょうどの行数に広げる」 方式にすると解消します。
+
+変更点（コード）
+
+modProcess の PasteToMasterByTable を下記に置き換えてください。
+
+'=== Masterへ貼付（テーブル名で厳密リサイズ） ===
+Public Sub PasteToMasterByTable(masterTbl As ListObject, dataArr As Variant)
+    Dim rows As Long, cols As Long
+    rows = UBound(dataArr, 1): cols = UBound(dataArr, 2)
+
+    ' 列数チェック
+    If masterTbl.ListColumns.Count <> cols Then
+        WriteLog "ERROR", "Master columns mismatch. Master=" & masterTbl.ListColumns.Count & " Mapping=" & cols
+        MsgBox "Masterテーブルの列数がMappingの出力列数と一致しません。", vbCritical
+        Exit Sub
+    End If
+
+    ' 1) ヘッダだけに一旦縮める（既存の余分な行を確実に消す）
+    masterTbl.Resize masterTbl.HeaderRowRange.Resize(1, cols)
+
+    ' 2) 目的の行数＋ヘッダに広げる
+    masterTbl.Resize masterTbl.HeaderRowRange.Resize(rows + 1, cols)
+
+    ' 3) 値を流し込み
+    masterTbl.DataBodyRange.Value = dataArr
+
+    ' 4) 念のため、最後の行が完全に空なら1行縮める（空配列のときの保険）
+    On Error Resume Next
+    If Application.WorksheetFunction.CountA(masterTbl.ListRows(masterTbl.ListRows.Count).Range) = 0 _
+       And masterTbl.ListRows.Count > 1 Then
+        masterTbl.Resize masterTbl.HeaderRowRange.Resize(masterTbl.ListRows.Count, cols)
+    End If
+    On Error GoTo 0
+End Sub
+
+これで「前回の行が残って1行多い」や「最終行が空なのに残る」ケースを避けられます。
+
+⸻
+
+参考：挙動の整理
+	•	インポート
+	•	BuildJoinedRaw ＝ 常に無加工（G列以降の指定カラムから値を取得。複数指定は改行連結）
+	•	Master はそのまま表示
+	•	データ加工
+	•	ApplyTransformSmart で EXPR/CONCAT/VALUE を解釈して加工後を再出力
+	•	CSV出力
+	•	これまで通り（ファイル名分岐の修正を入れている場合はその仕様に追従）
+
+⸻
+
+必要なら、該当モジュールの差分をコピペ用にもう少し展開して渡します。どうします？
