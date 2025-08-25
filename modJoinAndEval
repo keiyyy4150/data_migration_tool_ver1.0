@@ -165,12 +165,8 @@ Public Function BuildJoinedRaw(baseTbl As String) As Variant
     Dim haveBase As Boolean: haveBase = (Len(baseTbl) > 0)
     Dim baseKeyCols() As Long
 
-    Dim totalRows As Long
-    Dim r As Long
-    Dim myKey As String
-    Dim expand As Long
-    Dim k As Long
-    Dim c As Long
+    Dim totalRows As Long, r As Long, myKey As String
+    Dim expand As Long, k As Long, c As Long
 
     If Not haveBase Then
         Dim emptyArr() As Variant
@@ -182,7 +178,7 @@ Public Function BuildJoinedRaw(baseTbl As String) As Variant
     baseArr = TableData(baseTbl)
     baseKeyCols = CollectKeyColIndexesForBase(baseArr, baseTbl)
 
-    ' 行数見積もり
+    ' 行数見積り
     totalRows = 0
     For r = 2 To UBound(baseArr, 1)
         myKey = BuildKeyFromRow(baseArr, r, baseKeyCols)
@@ -205,7 +201,7 @@ Public Function BuildJoinedRaw(baseTbl As String) As Variant
     ReDim result(1 To totalRows, 1 To outColsCnt)
     ReDim m_baseRowIdx(1 To totalRows)
 
-    ' 実データ埋め
+    ' 実データ埋め（常に無加工：モードは無視）
     Dim outRow As Long: outRow = 0
     For r = 2 To UBound(baseArr, 1)
         myKey = BuildKeyFromRow(baseArr, r, baseKeyCols)
@@ -214,19 +210,11 @@ Public Function BuildJoinedRaw(baseTbl As String) As Variant
             expand = MaxMatchesForKey(myKey, baseTbl)
             If expand < 1 Then expand = 1
         End If
-
         For k = 1 To expand
             outRow = outRow + 1
             m_baseRowIdx(outRow) = r
             For c = 1 To outColsCnt
-                Select Case Map_Mode(c)
-                    Case "CONCAT"
-                        result(outRow, c) = BuildConcatRawValue(Map_Def(c), baseTbl, r, myKey, k)
-                    Case "EXPR"
-                        result(outRow, c) = EvaluateExpr(Map_Def(c), baseTbl, r, myKey, False, c)
-                    Case Else
-                        result(outRow, c) = BuildValueModeRaw(c, baseTbl, r, myKey, k)
-                End Select
+                result(outRow, c) = BuildValueModeRaw(c, baseTbl, r, myKey, k)
             Next c
         Next k
     Next r
@@ -628,7 +616,7 @@ Public Function ApplyTransformSmart(src As Variant) As Variant
         For c = 1 To cols
             Select Case Map_Mode(c)
                 Case "CONCAT"
-                    dst(r, c) = BuildConcatProcessedValue(Map_Def(c), m_baseTblName, m_baseRowIdx(r), GetKeyForRow(r), c)
+                    ' dst(r, c) = BuildConcatProcessedValue(Map_Def(c), m_baseTblName, m_baseRowIdx(r), GetKeyForRow(r), c)
                 Case "EXPR"
                     dst(r, c) = EvaluateExpr(Map_Def(c), m_baseTblName, m_baseRowIdx(r), GetKeyForRow(r), True, c)
                 Case Else
@@ -750,3 +738,4 @@ Private Function FinalizeByType(ByVal s As String, ByVal dataType As String) As 
             FinalizeByType = s
     End Select
 End Function
+
