@@ -280,3 +280,4 @@ Public Sub PasteToMasterByTable(masterTbl As ListObject, dataArr As Variant)
     masterTbl.Resize newRange
     masterTbl.DataBodyRange.Value = dataArr
 End Sub
+
