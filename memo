@@ -1,219 +1,40 @@
-ありがとうございます！
-最新コードをベースに、前回お伝えした「インポート時はモードを無視」「IFのthen/elseでトークン展開」などを反映させた完全コードを整理しました。
+mod MappingHelper最下部
 
-以下をそのまま貼り替えてください。
-
-⸻
-
-🔹 modGlobals（追記あり）
-
-Option Explicit
 
 '==============================
-' グローバル定数・共有変数
+' ベーステーブル選定（キー定義が成立している最初のテーブル。無ければ先頭）
+'  - tblNames : H列以降のテーブル名配列 Map_TblNames()
+'  - srcCols  : マッピングの元カラム   Map_SrcCols(行=出力列, 列=テーブル)
+'  - isKey    : キー列フラグ配列       Map_IsKey()
+' 返り値      : ベーステーブル名（空配列時は ""）
 '==============================
-Public Const IMPORT_FOLDER As String = "importFiles"   ' 入力フォルダ
-Public Const EXPORT_FOLDER As String = "exportFiles"   ' 出力フォルダ
-Public Const LOG_FOLDER    As String = "log"           ' ログフォルダ
-
-' エンコード（AUTO/UTF-8/SHIFT_JIS/UTF-16LE）
-Public CurrentEncodingMode As String
-
-' パイプライン（Main / List）
-Public CurrentMappingTableName As String
-Public CurrentMasterTableName  As String
-Public CurrentExportBaseName   As String
-
-' 1対多を展開するか（List パイプラインで True）
-Public AllowOneToMany As Boolean
-
-' 読み込んだ各テーブル（CSV）の2次元配列（Key: テーブル名）
-Public TableData As Object
-
-' JOIN 用のキー索引
-Public KeyIndexSingle As Object
-Public KeyIndexMulti  As Object
-
-' 無加工JOIN済みの中間データ
-Public RawJoined As Variant
-Public HasRaw As Boolean
-Public IsProcessed As Boolean
-
-' Mappingキャッシュ
-Public Map_OutCols()  As String
-Public Map_DataType() As String
-Public Map_IsKey()    As Boolean
-Public Map_Mode()     As String
-Public Map_Def()      As String
-Public Map_TblNames() As String
-Public Map_SrcCols    As Variant
-
-' JOIN再構築で使うベース情報
-Public m_baseTblName As String
-Public m_baseRowIdx() As Long
-
-'=== 追加：インポート時はモードを無視するフラグ ===
-Public IgnoreModeOnImport As Boolean
-
-'==============================
-' 共通関数
-'==============================
-Public Function TimeStamp() As String
-    TimeStamp = Format(Now, "yyyymmddhhmmss")
-End Function
-
-Public Function IsArrayInitialized(ByVal v As Variant) As Boolean
-    On Error GoTo EH
-    If IsArray(v) Then
-        Dim lb As Long
-        lb = LBound(v, 1)
-        IsArrayInitialized = True
+Public Function PickBaseTableName(tblNames() As String, srcCols As Variant, isKey() As Boolean) As String
+    Dim t As Long, i As Long
+    ' テーブル名が未設定なら空を返す
+    If (Not Not tblNames) = 0 Then
+        PickBaseTableName = ""
         Exit Function
     End If
-EH:
-    IsArrayInitialized = False
-End Function
-
-Public Function IsAllocated_Long(ByRef arr() As Long) As Boolean
-    On Error GoTo EH
-    Dim lb As Long
-    lb = LBound(arr, 1)
-    IsAllocated_Long = True
-    Exit Function
-EH:
-    IsAllocated_Long = False
-End Function
-
-
-⸻
-
-🔹 modProcess（ImportFiles のみ差分あり）
-
-Public Sub ImportFiles()
-    On Error GoTo EH
-    Dim tStart As Date: tStart = Now
     
-    If Len(CurrentEncodingMode) = 0 Then CurrentEncodingMode = "AUTO"
-    If Len(CurrentMappingTableName) = 0 Then UsePipelineMain
-    
-    Dim ok As Boolean
-    ok = ReadMappingFromTableName(CurrentMappingTableName)
-    If Not ok Then
-        MsgBox "Mapping の読み取りに失敗しました。", vbCritical
-        Exit Sub
-    End If
-    
-    Dim importPath As String: importPath = ThisWorkbook.Path & "\" & IMPORT_FOLDER & "\"
-    EnsureFolder ThisWorkbook.Path & "\" & LOG_FOLDER & "\"
-    
-    Set TableData = CreateObject("Scripting.Dictionary")
-    If Not LoadAllCsv(importPath, Map_TblNames, TableData) Then Exit Sub
-    
-    BuildKeyIndexes
-    
-    m_baseTblName = PickBaseTableName(Map_TblNames, Map_SrcCols, Map_IsKey)
-    If Len(m_baseTblName) = 0 And (Not Not Map_TblNames) <> 0 Then m_baseTblName = Map_TblNames(0)
-     
-    '=== ここでモードを無視して無加工JOIN ===
-    IgnoreModeOnImport = True
-    RawJoined = BuildJoinedRaw(m_baseTblName)
-    IgnoreModeOnImport = False
-    
-    HasRaw = True: IsProcessed = False
-    
-    Dim masterLo As ListObject
-    Set masterLo = GetListObjectByName(CurrentMasterTableName)
-    If masterLo Is Nothing Then
-        MsgBox "Masterテーブルが見つかりません: " & CurrentMasterTableName, vbCritical
-        Exit Sub
-    End If
-    PasteToMasterByTable masterLo, RawJoined
-    
-    MsgBox "ファイルインポート完了（無加工をMasterへ反映）", vbInformation
-    Exit Sub
-EH:
-    MsgBox "ImportFilesでエラー: " & Err.Description, vbCritical
-End Sub
-
-
-⸻
-
-🔹 modJoinAndEval（新規追加＋差し替え）
-
-追加：インポート専用の値取得
-
-Public Function BuildRawValueIgnoringMode(colIndex As Long, baseTbl As String, baseRow As Long, myKey As String, _
-                                          Optional matchIndex As Long = 1) As String
-    Dim t As Long, acc As String: acc = ""
-    For t = LBound(Map_TblNames) To UBound(Map_TblNames)
-        Dim names As Collection: Set names = SafeGetSrcColNames(colIndex, t)
-        If names.Count = 0 Then GoTo CONT_T
-        
-        If Map_TblNames(t) = baseTbl Then
-            Dim arr As Variant: arr = TableData(baseTbl)
-            Dim j As Long, nm As String, ci As Long, v As String
-            For j = 1 To names.Count
-                nm = names(j)
-                If IsNumeric(nm) Then
-                    ci = CLng(nm)
-                Else
-                    ci = FindColumnIndex(arr, nm)
-                End If
-                If ci > 0 Then
-                    v = CStr(arr(baseRow, ci))
-                    If Len(v) > 0 Then
-                        If Len(acc) = 0 Then acc = v Else acc = acc & vbLf & v
+    ' どれか1つでも「キー=○」かつ該当テーブルに元カラムが指定されている最初のテーブルを採用
+    For t = LBound(tblNames) To UBound(tblNames)
+        For i = LBound(isKey) To UBound(isKey)
+            If isKey(i) Then
+                ' srcCols(行=i, 列=t) が範囲内か確認
+                If (Not IsEmpty(srcCols)) Then
+                    On Error Resume Next
+                    Dim hasCol As Boolean
+                    hasCol = (Len(Trim$(CStr(srcCols(i, t)))) > 0)
+                    On Error GoTo 0
+                    If hasCol Then
+                        PickBaseTableName = tblNames(t)
+                        Exit Function
                     End If
                 End If
-            Next
-        Else
-            Dim j2 As Long, nm2 As String, got As String
-            For j2 = 1 To names.Count
-                nm2 = names(j2)
-                got = GetValueFromTableMulti(Map_TblNames(t), nm2, myKey, matchIndex)
-                If Len(got) > 0 Then
-                    If Len(acc) = 0 Then acc = got Else acc = acc & vbLf & got
-                End If
-            Next
-        End If
-CONT_T:
-    Next
-    BuildRawValueIgnoringMode = acc
+            End If
+        Next i
+    Next t
+    
+    ' 上で見つからなければ、先頭を採用
+    PickBaseTableName = tblNames(LBound(tblNames))
 End Function
-
-差し替え：BuildJoinedRaw の中の列ループ
-
-For c = 1 To outColsCnt
-    If IgnoreModeOnImport Then
-        result(outRow, c) = BuildRawValueIgnoringMode(c, baseTbl, r, myKey, k)
-    Else
-        Select Case Map_Mode(c)
-            Case "CONCAT"
-                result(outRow, c) = BuildConcatRawValue(Map_Def(c), baseTbl, r, myKey, k)
-            Case "EXPR"
-                result(outRow, c) = EvaluateExpr(Map_Def(c), baseTbl, r, myKey, False, c)
-            Case Else
-                result(outRow, c) = BuildValueModeRaw(c, baseTbl, r, myKey, k)
-        End Select
-    End If
-Next c
-
-差し替え：EvalIFLine の then/else 返却部分
-
-If ok Then
-    EvalIFLine = ApplyTemplate(thenText, baseTbl, baseRow, myKey, processed, outColIndex)
-Else
-    EvalIFLine = ApplyTemplate(elseText, baseTbl, baseRow, myKey, processed, outColIndex)
-End If
-
-
-⸻
-
-✅ これでできること
-	•	「インポート」時はモードを無視し、MappingのG列以降の元カラムをそのまま改行連結してMasterに出力。
-	•	「データ加工」時は従来通りモード（VALUE/CONCAT/EXPR）を適用。
-	•	IF文の then/else に {tbl.col} を含めれば 実値展開される。
-
-⸻
-
-👉 ご希望であれば、この修正を反映させた modJoinAndEval 丸ごと最新版 を出力できますが、いかがしますか？
