@@ -1,40 +1,173 @@
-mod MappingHelper最下部
+了解です。原因は2点です。
+	1.	インポート時（無加工）の値取得が「モード」に左右されてしまい、VALUE 以外だと最初の1個しか取らない実装になっていた
+	2.	IF(...) の then/else 文字列内に {テーブル.列} を書いた場合、そのトークン展開をしていなかった
 
+下記の差分で解決します。そのまま置き換えてください。
+
+⸻
+
+① 無加工インポート時は“常に”複数カラムを改行連結にする
+
+A. modJoinAndEval の BuildValueModeRaw を置き換え
 
 '==============================
-' ベーステーブル選定（キー定義が成立している最初のテーブル。無ければ先頭）
-'  - tblNames : H列以降のテーブル名配列 Map_TblNames()
-'  - srcCols  : マッピングの元カラム   Map_SrcCols(行=出力列, 列=テーブル)
-'  - isKey    : キー列フラグ配列       Map_IsKey()
-' 返り値      : ベーステーブル名（空配列時は ""）
+' VALUE/CONCAT の raw 取得（k番目のマッチを考慮）
+' 変更点：
+'  - Optional forceJoinMultiple を追加
+'  - doJoin = forceJoinMultiple Or (モードがVALUE/空) で改行連結の可否を決定
 '==============================
-Public Function PickBaseTableName(tblNames() As String, srcCols As Variant, isKey() As Boolean) As String
-    Dim t As Long, i As Long
-    ' テーブル名が未設定なら空を返す
-    If (Not Not tblNames) = 0 Then
-        PickBaseTableName = ""
-        Exit Function
-    End If
-    
-    ' どれか1つでも「キー=○」かつ該当テーブルに元カラムが指定されている最初のテーブルを採用
-    For t = LBound(tblNames) To UBound(tblNames)
-        For i = LBound(isKey) To UBound(isKey)
-            If isKey(i) Then
-                ' srcCols(行=i, 列=t) が範囲内か確認
-                If (Not IsEmpty(srcCols)) Then
-                    On Error Resume Next
-                    Dim hasCol As Boolean
-                    hasCol = (Len(Trim$(CStr(srcCols(i, t)))) > 0)
-                    On Error GoTo 0
-                    If hasCol Then
-                        PickBaseTableName = tblNames(t)
-                        Exit Function
+Public Function BuildValueModeRaw(colIndex As Long, baseTbl As String, baseRow As Long, myKey As String, _
+                                  Optional matchIndex As Long = 1, _
+                                  Optional forceJoinMultiple As Boolean = False) As Variant
+    Dim t As Long, v As Variant
+    v = ""
+    If (Not Not Map_TblNames) = 0 Then BuildValueModeRaw = v: Exit Function
+
+    Dim doJoin As Boolean
+    doJoin = forceJoinMultiple Or (UCase$(Map_Mode(colIndex)) = "VALUE" Or Len(Map_Mode(colIndex)) = 0)
+
+    For t = LBound(Map_TblNames) To UBound(Map_TblNames)
+        Dim names As Collection: Set names = SafeGetSrcColNames(colIndex, t)
+        If names Is Nothing Or names.Count = 0 Then GoTo CONT_T
+
+        If Map_TblNames(t) = baseTbl Then
+            Dim arr As Variant: arr = TableData(baseTbl)
+            Dim acc As String: acc = ""
+            Dim j As Long, one As String, ci As Long, valStr As String
+            For j = 1 To names.Count
+                one = names(j)
+                If IsNumeric(one) Then
+                    ci = CLng(one)
+                Else
+                    ci = FindColumnIndex(arr, one)
+                End If
+                If ci > 0 Then
+                    valStr = CStr(arr(baseRow, ci))
+                    If doJoin Then
+                        If Len(valStr) > 0 Then
+                            If Len(acc) = 0 Then acc = valStr Else acc = acc & vbLf & valStr
+                        End If
+                    Else
+                        v = valStr: Exit For
                     End If
                 End If
-            End If
-        Next i
-    Next t
-    
-    ' 上で見つからなければ、先頭を採用
-    PickBaseTableName = tblNames(LBound(tblNames))
+            Next
+            If doJoin Then v = acc
+            If Len(CStr(v)) > 0 Then BuildValueModeRaw = v: Exit Function
+
+        Else
+            Dim acc2 As String: acc2 = ""
+            Dim j2 As Long, nm As String, got As String
+            For j2 = 1 To names.Count
+                nm = names(j2)
+                got = GetValueFromTableMulti(Map_TblNames(t), nm, myKey, matchIndex)
+                If doJoin Then
+                    If Len(got) > 0 Then
+                        If Len(acc2) = 0 Then acc2 = got Else acc2 = acc2 & vbLf & got
+                    End If
+                Else
+                    If Len(got) > 0 Then v = got: Exit For
+                End If
+            Next
+            If doJoin Then v = acc2
+            If Len(CStr(v)) > 0 Then BuildValueModeRaw = v: Exit Function
+        End If
+CONT_T:
+    Next
+    BuildValueModeRaw = v
 End Function
+
+B. modJoinAndEval の BuildJoinedRaw 内呼び出しを置き換え
+
+（無加工はモード無視＝forceJoinMultiple:=True）
+
+' 実データ埋め（常に無加工：モードは無視）
+Dim outRow As Long: outRow = 0
+For r = 2 To UBound(baseArr, 1)
+    myKey = BuildKeyFromRow(baseArr, r, baseKeyCols)
+    expand = 1
+    If AllowOneToMany Then
+        expand = MaxMatchesForKey(myKey, baseTbl)
+        If expand < 1 Then expand = 1
+    End If
+    For k = 1 To expand
+        outRow = outRow + 1
+        m_baseRowIdx(outRow) = r
+        For c = 1 To outColsCnt
+            ' ★ ここを forceJoinMultiple:=True に
+            result(outRow, c) = BuildValueModeRaw(c, baseTbl, r, myKey, k, True)
+        Next c
+    Next k
+Next r
+
+これで、**インポート時は常に G列以降の元カラムが「複数指定なら改行連結」**で Master に入ります（モードは見ません）。
+質問の「H列は複数とれて I列は1個しか表示されない」も、ここで揃えて解消されます。
+
+⸻
+
+② IF の then/else 文字列に含まれる {テーブル.列} を展開
+
+IF(...) の分岐で返す文字列は、いままでトークン置換していなかったため、
+"Q{pcm_t_コンプラ相談.SEQ}" のように書くと {...} がそのまま出ていました。
+
+EvalIFLine を差し替えて、then/else を ApplyTemplate に通してから返すようにします。
+
+Private Function EvalIFLine(ByVal line As String, baseTbl As String, baseRow As Long, myKey As String, _
+                            ByVal processed As Boolean, ByVal outColIndex As Long) As String
+    Dim fn As String, inside As String
+    Dim pOpen As Long, pClose As Long
+    pOpen = InStr(line, "("): pClose = InStrRev(line, ")")
+    If pOpen = 0 Or pClose = 0 Or pClose <= pOpen Then Exit Function
+    fn = UCase$(Left$(line, pOpen - 1))
+    inside = Mid$(line, pOpen + 1, pClose - pOpen - 1)
+
+    Dim args As Collection: Set args = SplitArgs(inside)
+    If args.Count < 3 Then Exit Function
+
+    Dim thenText As String, elseText As String
+    thenText = StripQuotes(args(args.Count - 1))
+    elseText = StripQuotes(args(args.Count))
+
+    Dim ok As Boolean
+    Select Case fn
+        Case "IF"
+            ok = EvalOneCondition(args(1), baseTbl, baseRow, myKey, processed, outColIndex)
+        Case "IFALL"
+            ok = EvalAllConditions(args, 1, args.Count - 2, baseTbl, baseRow, myKey, processed, outColIndex)
+        Case "IFANY"
+            ok = EvalAnyConditions(args, 1, args.Count - 2, baseTbl, baseRow, myKey, processed, outColIndex)
+        Case Else
+            ok = False
+    End Select
+
+    If ok Then
+        ' ★ thenText 内の {tbl.col} を展開
+        EvalIFLine = ApplyTemplate(thenText, baseTbl, baseRow, myKey, processed, outColIndex)
+    Else
+        ' ★ elseText 内の {tbl.col} を展開
+        EvalIFLine = ApplyTemplate(elseText, baseTbl, baseRow, myKey, processed, outColIndex)
+    End If
+End Function
+
+これで、たとえばマッピングの定義（F=EXPR, G=定義）に
+
+IF({pcm_t_コンプラ相談.SEQ}="","","Q{pcm_t_コンプラ相談.SEQ}")
+
+と書けば、加工（Process）時に "Q12345" のように正しく展開されます。
+（インポート時は無加工なので EXPR は無視され、元の値がそのまま入ります）
+
+⸻
+
+動作イメージ（確認ポイント）
+	•	インポート（無加工）
+	•	G列以降の元カラムに改行で複数列を書いていれば、Master でも改行で全部入る
+	•	モード（VALUE/EXPR/CONCAT）は見ない（常に「複数→改行連結」の素取り）
+	•	データ加工（Process）
+	•	モードが EXPR の列は IF/IFALL/IFANY や四則演算、テンプレを評価
+	•	IF の then/else に {tbl.col} を含めても 展開される（今回の修正）
+	•	例：IF({pcm_t_コンプラ相談.SEQ}="","","Q{pcm_t_コンプラ相談.SEQ}")
+
+⸻
+
+必要なら、該当ファイルの該当関数だけ切り出して送りますが、上の2か所を置き換えればOKです。
+他にも詰まりそうなら、該当マッピング行のスクショ（モード/定義/元カラムの書き方）を教えてください。
