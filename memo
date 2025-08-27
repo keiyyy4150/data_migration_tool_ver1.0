@@ -1,173 +1,394 @@
-了解です。原因は2点です。
-	1.	インポート時（無加工）の値取得が「モード」に左右されてしまい、VALUE 以外だと最初の1個しか取らない実装になっていた
-	2.	IF(...) の then/else 文字列内に {テーブル.列} を書いた場合、そのトークン展開をしていなかった
-
-下記の差分で解決します。そのまま置き換えてください。
+了解です！
+いただいた“最新コード”に手を入れずに差し込める形で、**案2（行ベース AND/OR グループ）**のフィルター機能を追加します。
+以下をそのまま貼り付け・置き換えしてください。
 
 ⸻
 
-① 無加工インポート時は“常に”複数カラムを改行連結にする
+1) 新規モジュール：modFilterRules（まるごと新規追加）
 
-A. modJoinAndEval の BuildValueModeRaw を置き換え
+Attribute VB_Name = "modFilterRules"
+Option Explicit
 
-'==============================
-' VALUE/CONCAT の raw 取得（k番目のマッチを考慮）
-' 変更点：
-'  - Optional forceJoinMultiple を追加
-'  - doJoin = forceJoinMultiple Or (モードがVALUE/空) で改行連結の可否を決定
-'==============================
-Public Function BuildValueModeRaw(colIndex As Long, baseTbl As String, baseRow As Long, myKey As String, _
-                                  Optional matchIndex As Long = 1, _
-                                  Optional forceJoinMultiple As Boolean = False) As Variant
-    Dim t As Long, v As Variant
-    v = ""
-    If (Not Not Map_TblNames) = 0 Then BuildValueModeRaw = v: Exit Function
+'========================================================
+' Filter_RulesSimple（テーブル名）を読み込んで
+' 各ベーステーブルごとのフィルタ規則に分配し、
+' TableData(<対象テーブル>) を行単位で絞り込みます。
+'
+' ルール表（ListObject名：Filter_RulesSimple）レイアウト想定：
+'   A:有効（○/1/TRUE）   B:対象ベース（CSVヘッダのテーブル名）
+'   C:グループ（整数）    D:列（CSVのヘッダ名）
+'   E:演算子（=, <>, >, >=, <, <=, BETWEEN, IN, LIKE, STARTSWITH, ENDSWITH, ISNULL, NOTNULL）
+'   F:値1                  G:値2（BETWEENの上限など）
+'
+' 評価ロジック：
+'   - 同じグループ番号の行は AND で結合
+'   - グループ間は OR で結合
+'   - つまり WHERE (group=10 条件 AND …) OR (group=20 条件 AND …) …
+'
+' 注意：
+'   - 列名（D列）は CSV のヘッダ文字列と一致させてください
+'   - 型指定列は持たない設計。判定時に IsDate/IsNumeric で緩やかに解釈
+'========================================================
 
-    Dim doJoin As Boolean
-    doJoin = forceJoinMultiple Or (UCase$(Map_Mode(colIndex)) = "VALUE" Or Len(Map_Mode(colIndex)) = 0)
+Private Type TFilterRule
+    Enabled As Boolean
+    TargetTable As String
+    GroupId As Long
+    ColName As String
+    Op As String
+    Val1 As String
+    Val2 As String
+End Type
 
-    For t = LBound(Map_TblNames) To UBound(Map_TblNames)
-        Dim names As Collection: Set names = SafeGetSrcColNames(colIndex, t)
-        If names Is Nothing Or names.Count = 0 Then GoTo CONT_T
+'=== 入口：フィルタ読込→適用（ImportFiles内から呼ぶ想定） ===
+Public Sub ApplyFiltersIfExist()
+    Dim lo As ListObject
+    Set lo = GetListObjectByName("Filter_RulesSimple")
+    If lo Is Nothing Then
+        WriteLog "INFO", "Filter_RulesSimple not found. Skip filtering."
+        Exit Sub
+    End If
 
-        If Map_TblNames(t) = baseTbl Then
-            Dim arr As Variant: arr = TableData(baseTbl)
-            Dim acc As String: acc = ""
-            Dim j As Long, one As String, ci As Long, valStr As String
-            For j = 1 To names.Count
-                one = names(j)
-                If IsNumeric(one) Then
-                    ci = CLng(one)
-                Else
-                    ci = FindColumnIndex(arr, one)
-                End If
-                If ci > 0 Then
-                    valStr = CStr(arr(baseRow, ci))
-                    If doJoin Then
-                        If Len(valStr) > 0 Then
-                            If Len(acc) = 0 Then acc = valStr Else acc = acc & vbLf & valStr
-                        End If
-                    Else
-                        v = valStr: Exit For
-                    End If
-                End If
-            Next
-            If doJoin Then v = acc
-            If Len(CStr(v)) > 0 Then BuildValueModeRaw = v: Exit Function
+    Dim rules As Collection
+    Set rules = ReadRulesFromListObject(lo)
+    If rules Is Nothing Or rules.Count = 0 Then
+        WriteLog "INFO", "Filter_RulesSimple is empty. Skip filtering."
+        Exit Sub
+    End If
 
+    ' ベーステーブル毎に抽出
+    Dim byTable As Object
+    Set byTable = GroupRulesByTable(rules)
+
+    Dim t As Variant
+    For Each t In byTable.Keys
+        If TableData.Exists(CStr(t)) Then
+            Dim arr As Variant
+            arr = TableData(CStr(t))
+            Dim grouped As Object
+            Set grouped = byTable(CStr(t)) ' GroupId -> Collection(TFilterRule)
+            Dim filtered As Variant
+            filtered = FilterArrayByGroups(arr, grouped)
+            TableData(CStr(t)) = filtered
+            WriteLog "INFO", "Filtered table=" & CStr(t) & " rows=" & IIf(IsArray(filtered), UBound(filtered, 1) - 1, 0)
         Else
-            Dim acc2 As String: acc2 = ""
-            Dim j2 As Long, nm As String, got As String
-            For j2 = 1 To names.Count
-                nm = names(j2)
-                got = GetValueFromTableMulti(Map_TblNames(t), nm, myKey, matchIndex)
-                If doJoin Then
-                    If Len(got) > 0 Then
-                        If Len(acc2) = 0 Then acc2 = got Else acc2 = acc2 & vbLf & got
-                    End If
-                Else
-                    If Len(got) > 0 Then v = got: Exit For
-                End If
-            Next
-            If doJoin Then v = acc2
-            If Len(CStr(v)) > 0 Then BuildValueModeRaw = v: Exit Function
+            WriteLog "WARN", "Filter target table not loaded: " & CStr(t)
         End If
-CONT_T:
     Next
-    BuildValueModeRaw = v
+End Sub
+
+'=== ルール読み込み ===
+Private Function ReadRulesFromListObject(lo As ListObject) As Collection
+    Dim col As New Collection
+    Dim r As Long, lastRow As Long
+    lastRow = lo.ListRows.Count
+    If lastRow = 0 Then Set ReadRulesFromListObject = col: Exit Function
+
+    Dim body As Range: Set body = lo.DataBodyRange
+
+    For r = 1 To lastRow
+        Dim rule As TFilterRule, ok As Boolean
+        ok = IsEnabled(body.Cells(r, 1).Value)
+        If ok Then
+            rule.Enabled = True
+            rule.TargetTable = Trim$(CStr(body.Cells(r, 2).Value))
+            rule.GroupId = CLng(Val(body.Cells(r, 3).Value))
+            rule.ColName = Trim$(CStr(body.Cells(r, 4).Value))
+            rule.Op = UCase$(Trim$(CStr(body.Cells(r, 5).Value)))
+            rule.Val1 = CStr(body.Cells(r, 6).Value)
+            rule.Val2 = CStr(body.Cells(r, 7).Value)
+            If Len(rule.TargetTable) > 0 And Len(rule.ColName) > 0 And Len(rule.Op) > 0 Then
+                col.Add rule
+            End If
+        End If
+    Next
+    Set ReadRulesFromListObject = col
 End Function
 
-B. modJoinAndEval の BuildJoinedRaw 内呼び出しを置き換え
+Private Function IsEnabled(v As Variant) As Boolean
+    Dim s As String: s = UCase$(Trim$(CStr(v)))
+    IsEnabled = (s = "○" Or s = "1" Or s = "TRUE" Or s = "YES" Or s = "有効")
+End Function
 
-（無加工はモード無視＝forceJoinMultiple:=True）
+'=== テーブル名→(GroupId→ルール群) に分配 ===
+Private Function GroupRulesByTable(rules As Collection) As Object
+    Dim tblMap As Object: Set tblMap = CreateObject("Scripting.Dictionary")
+    Dim i As Long
+    For i = 1 To rules.Count
+        Dim kTbl As String: kTbl = rules(i).TargetTable
+        If Not tblMap.Exists(kTbl) Then
+            tblMap.Add kTbl, CreateObject("Scripting.Dictionary") ' groupId -> Collection(rule)
+        End If
+        Dim g As Object: Set g = tblMap(kTbl)
+        Dim gid As Long: gid = rules(i).GroupId
+        If Not g.Exists(gid) Then
+            g.Add gid, New Collection
+        End If
+        g(gid).Add rules(i)
+    Next
+    Set GroupRulesByTable = tblMap
+End Function
 
-' 実データ埋め（常に無加工：モードは無視）
-Dim outRow As Long: outRow = 0
-For r = 2 To UBound(baseArr, 1)
-    myKey = BuildKeyFromRow(baseArr, r, baseKeyCols)
-    expand = 1
-    If AllowOneToMany Then
-        expand = MaxMatchesForKey(myKey, baseTbl)
-        If expand < 1 Then expand = 1
+'=== OR(グループ) / AND(各グループ内) で配列を絞る ===
+Private Function FilterArrayByGroups(arr As Variant, grouped As Object) As Variant
+    On Error GoTo EH
+    If Not IsArray(arr) Then FilterArrayByGroups = arr: Exit Function
+    Dim rUB1 As Long, rUB2 As Long
+    rUB1 = UBound(arr, 1): rUB2 = UBound(arr, 2)
+    If rUB1 < 2 Then FilterArrayByGroups = arr: Exit Function ' ヘッダのみ
+
+    ' 列名から列番号へ（毎回Findするのは重いので、先に辞書化）
+    Dim colIdx As Object: Set colIdx = CreateObject("Scripting.Dictionary")
+    Dim c As Long
+    For c = 1 To rUB2
+        colIdx(AddNorm(arr(1, c))) = c
+    Next
+
+    ' 行を評価
+    Dim keep() As Boolean
+    ReDim keep(2 To rUB1)
+    Dim r As Long
+    For r = 2 To rUB1
+        keep(r) = RowMatchesGroups(arr, r, colIdx, grouped)
+    Next
+
+    ' 抽出結果を作成（ヘッダ＋一致行）
+    Dim outRows As Long: outRows = 1 ' ヘッダ
+    For r = 2 To rUB1
+        If keep(r) Then outRows = outRows + 1
+    Next
+    If outRows = 1 Then
+        ' 1行も一致しなければヘッダのみ返す
+        Dim outEmpty() As Variant
+        ReDim outEmpty(1 To 1, 1 To rUB2)
+        For c = 1 To rUB2: outEmpty(1, c) = arr(1, c): Next
+        FilterArrayByGroups = outEmpty
+        Exit Function
     End If
-    For k = 1 To expand
-        outRow = outRow + 1
-        m_baseRowIdx(outRow) = r
-        For c = 1 To outColsCnt
-            ' ★ ここを forceJoinMultiple:=True に
-            result(outRow, c) = BuildValueModeRaw(c, baseTbl, r, myKey, k, True)
-        Next c
-    Next k
-Next r
 
-これで、**インポート時は常に G列以降の元カラムが「複数指定なら改行連結」**で Master に入ります（モードは見ません）。
-質問の「H列は複数とれて I列は1個しか表示されない」も、ここで揃えて解消されます。
+    Dim outArr() As Variant
+    ReDim outArr(1 To outRows, 1 To rUB2)
+    ' ヘッダ
+    For c = 1 To rUB2: outArr(1, c) = arr(1, c): Next
+    ' データ
+    Dim w As Long: w = 1
+    For r = 2 To rUB1
+        If keep(r) Then
+            w = w + 1
+            For c = 1 To rUB2
+                outArr(w, c) = arr(r, c)
+            Next
+        End If
+    Next
+    FilterArrayByGroups = outArr
+    Exit Function
+EH:
+    ' 失敗したら元を返す
+    FilterArrayByGroups = arr
+End Function
 
-⸻
+Private Function RowMatchesGroups(arr As Variant, r As Long, colIdx As Object, grouped As Object) As Boolean
+    ' OR across groups
+    Dim g As Variant
+    For Each g In grouped.Keys
+        If RowMatchesOneGroup(arr, r, colIdx, grouped(g)) Then
+            RowMatchesGroups = True
+            Exit Function
+        End If
+    Next
+    RowMatchesGroups = False
+End Function
 
-② IF の then/else 文字列に含まれる {テーブル.列} を展開
+Private Function RowMatchesOneGroup(arr As Variant, r As Long, colIdx As Object, rules As Collection) As Boolean
+    ' AND inside a group
+    Dim i As Long
+    For i = 1 To rules.Count
+        If Not RowMatchesOneRule(arr, r, colIdx, rules(i)) Then
+            RowMatchesOneGroup = False
+            Exit Function
+        End If
+    Next
+    RowMatchesOneGroup = True
+End Function
 
-IF(...) の分岐で返す文字列は、いままでトークン置換していなかったため、
-"Q{pcm_t_コンプラ相談.SEQ}" のように書くと {...} がそのまま出ていました。
+Private Function RowMatchesOneRule(arr As Variant, r As Long, colIdx As Object, rule As TFilterRule) As Boolean
+    Dim cKey As String: cKey = AddNorm(rule.ColName)
+    If Not colIdx.Exists(cKey) Then
+        ' 列が見つからなければ不一致扱い
+        RowMatchesOneRule = False
+        Exit Function
+    End If
+    Dim ci As Long: ci = colIdx(cKey)
+    Dim v As Variant: v = arr(r, ci)
+    Dim op As String: op = rule.Op
 
-EvalIFLine を差し替えて、then/else を ApplyTemplate に通してから返すようにします。
+    Select Case op
+        Case "ISNULL"
+            RowMatchesOneRule = (Trim$(CStr(v)) = "")
+        Case "NOTNULL"
+            RowMatchesOneRule = (Trim$(CStr(v)) <> "")
+        Case "IN"
+            RowMatchesOneRule = ValueInList(v, rule.Val1) ' Val1 を「,」区切りの集合として扱う
 
-Private Function EvalIFLine(ByVal line As String, baseTbl As String, baseRow As Long, myKey As String, _
-                            ByVal processed As Boolean, ByVal outColIndex As Long) As String
-    Dim fn As String, inside As String
-    Dim pOpen As Long, pClose As Long
-    pOpen = InStr(line, "("): pClose = InStrRev(line, ")")
-    If pOpen = 0 Or pClose = 0 Or pClose <= pOpen Then Exit Function
-    fn = UCase$(Left$(line, pOpen - 1))
-    inside = Mid$(line, pOpen + 1, pClose - pOpen - 1)
+        Case "LIKE"
+            RowMatchesOneRule = LikeMatch(CStr(v), CStr(rule.Val1)) ' ワイルドカード *? を許容
 
-    Dim args As Collection: Set args = SplitArgs(inside)
-    If args.Count < 3 Then Exit Function
+        Case "STARTSWITH"
+            RowMatchesOneRule = (Left$(CStr(v), Len(CStr(rule.Val1))) = CStr(rule.Val1))
+        Case "ENDSWITH"
+            RowMatchesOneRule = (Right$(CStr(v), Len(CStr(rule.Val1))) = CStr(rule.Val1))
 
-    Dim thenText As String, elseText As String
-    thenText = StripQuotes(args(args.Count - 1))
-    elseText = StripQuotes(args(args.Count))
+        Case "BETWEEN"
+            RowMatchesOneRule = CompareBetween(v, rule.Val1, rule.Val2)
 
-    Dim ok As Boolean
-    Select Case fn
-        Case "IF"
-            ok = EvalOneCondition(args(1), baseTbl, baseRow, myKey, processed, outColIndex)
-        Case "IFALL"
-            ok = EvalAllConditions(args, 1, args.Count - 2, baseTbl, baseRow, myKey, processed, outColIndex)
-        Case "IFANY"
-            ok = EvalAnyConditions(args, 1, args.Count - 2, baseTbl, baseRow, myKey, processed, outColIndex)
+        Case "=", "<>", ">", ">=", "<", "<="
+            RowMatchesOneRule = CompareScalar(v, op, rule.Val1)
+
         Case Else
-            ok = False
+            ' 未知演算子は不一致扱い
+            RowMatchesOneRule = False
     End Select
+End Function
 
-    If ok Then
-        ' ★ thenText 内の {tbl.col} を展開
-        EvalIFLine = ApplyTemplate(thenText, baseTbl, baseRow, myKey, processed, outColIndex)
+'=== 文字列正規化（BOM除去＋Trim） ===
+Private Function AddNorm(ByVal s As String) As String
+    If Len(s) = 0 Then AddNorm = "": Exit Function
+    s = Replace$(s, ChrW(&HFEFF), "")
+    s = Trim$(s)
+    AddNorm = s
+End Function
+
+'=== 比較：IN（Val1 をカンマ区切り） ===
+Private Function ValueInList(v As Variant, listCsv As String) As Boolean
+    Dim parts() As String, i As Long, meS As String
+    meS = CStr(v)
+    parts = Split(listCsv, ",")
+    For i = LBound(parts) To UBound(parts)
+        If meS = Trim$(parts(i)) Then
+            ValueInList = True: Exit Function
+        End If
+    Next
+    ValueInList = False
+End Function
+
+'=== 比較：LIKE（* と ? に対応。正規表現ではなく VBA Like） ===
+Private Function LikeMatch(ByVal s As String, ByVal pat As String) As Boolean
+    LikeMatch = (CStr(s) Like CStr(pat))
+End Function
+
+'=== 比較：スカラー（=, <>, >, >=, <, <=） ===
+Private Function CompareScalar(v As Variant, op As String, rhs As String) As Boolean
+    Dim a As Variant, b As Variant
+    a = v: b = rhs
+
+    ' 型の緩い推定：日付 > 数値 > 文字列
+    If IsDate(a) And IsDate(b) Then
+        CompareScalar = CompareByOp(CDbl(CDate(a)), op, CDbl(CDate(b)))
+    ElseIf IsNumeric(a) And IsNumeric(b) Then
+        CompareScalar = CompareByOp(CDbl(a), op, CDbl(b))
     Else
-        ' ★ elseText 内の {tbl.col} を展開
-        EvalIFLine = ApplyTemplate(elseText, baseTbl, baseRow, myKey, processed, outColIndex)
+        CompareScalar = CompareByOp(CStr(a), op, CStr(b))
     End If
 End Function
 
-これで、たとえばマッピングの定義（F=EXPR, G=定義）に
+Private Function CompareBetween(v As Variant, low As String, high As String) As Boolean
+    Dim a As Variant, lo As Variant, hi As Variant
+    a = v: lo = low: hi = high
+    If IsDate(a) And IsDate(lo) And IsDate(hi) Then
+        CompareBetween = (CDbl(CDate(a)) >= CDbl(CDate(lo)) And CDbl(CDate(a)) <= CDbl(CDate(hi)))
+    ElseIf IsNumeric(a) And IsNumeric(lo) And IsNumeric(hi) Then
+        Dim x As Double: x = CDbl(a)
+        CompareBetween = (x >= CDbl(lo) And x <= CDbl(hi))
+    Else
+        Dim s As String: s = CStr(a)
+        CompareBetween = (s >= CStr(lo) And s <= CStr(hi))
+    End If
+End Function
 
-IF({pcm_t_コンプラ相談.SEQ}="","","Q{pcm_t_コンプラ相談.SEQ}")
+Private Function CompareByOp(a As Variant, op As String, b As Variant) As Boolean
+    Select Case op
+        Case "=":   CompareByOp = (a = b)
+        Case "<>":  CompareByOp = (a <> b)
+        Case ">":   CompareByOp = (a > b)
+        Case ">=":  CompareByOp = (a >= b)
+        Case "<":   CompareByOp = (a < b)
+        Case "<=":  CompareByOp = (a <= b)
+        Case Else:  CompareByOp = False
+    End Select
+End Function
 
-と書けば、加工（Process）時に "Q12345" のように正しく展開されます。
-（インポート時は無加工なので EXPR は無視され、元の値がそのまま入ります）
 
 ⸻
 
-動作イメージ（確認ポイント）
-	•	インポート（無加工）
-	•	G列以降の元カラムに改行で複数列を書いていれば、Master でも改行で全部入る
-	•	モード（VALUE/EXPR/CONCAT）は見ない（常に「複数→改行連結」の素取り）
-	•	データ加工（Process）
-	•	モードが EXPR の列は IF/IFALL/IFANY や四則演算、テンプレを評価
-	•	IF の then/else に {tbl.col} を含めても 展開される（今回の修正）
-	•	例：IF({pcm_t_コンプラ相談.SEQ}="","","Q{pcm_t_コンプラ相談.SEQ}")
+2) 既存 modProcess.ImportFiles の変更点
+
+「CSV読込 → キー索引の構築」の前に、上のフィルターを適用してください。
+以下の該当位置に2行を追加（コメントごとコピペOK）。
+
+' ...LoadAllCsv 成功後
+WriteLog "INFO", "LoadAllCsv succeeded"
+
+' ▼▼ ここでフィルター適用（存在すれば発動） ▼▼
+ApplyFiltersIfExist
+WriteLog "INFO", "ApplyFiltersIfExist done"
+
+' キー辞書（Single & Multi）
+BuildKeyIndexes
+
+これで、Filter_RulesSimple がある場合のみ自動でフィルタが効き、
+無い場合/空の場合は何もせず従来どおり進みます。
 
 ⸻
 
-必要なら、該当ファイルの該当関数だけ切り出して送りますが、上の2か所を置き換えればOKです。
-他にも詰まりそうなら、該当マッピング行のスクショ（モード/定義/元カラムの書き方）を教えてください。
+3) ルール表のレイアウト（最小）
+
+シートにテーブル（ListObject）名 Filter_RulesSimple を作成して、ヘッダを次の7列にしてください。
+
+A:有効	B:対象ベース	C:グループ	D:列	E:演算子	F:値1	G:値2
+
+
+	•	有効: ○ / 1 / TRUE など（空は無視）
+	•	対象ベース: 絞り込みたい CSV のテーブル名（拡張子なし）
+例: pcm_t_コンプラ相談
+	•	グループ: 同じ番号は AND、番号が異なるグループ同士は OR
+	•	列: CSV のヘッダ名を正確に（BOM/空白は内部で吸収）
+	•	演算子:
+	•	=, <>, >, >=, <, <=
+	•	BETWEEN（値1=下限, 値2=上限）
+	•	IN（値1に「カンマ区切り」）
+	•	LIKE（ワイルドカード * と ? ）
+	•	STARTSWITH, ENDSWITH
+	•	ISNULL, NOTNULL
+	•	値1 / 値2: 必要に応じて設定（不要なら空でOK）
+
+⸻
+
+例：ご要望の SQL 風条件
+
+作成日が「2023年4月以降」かつ削除フラグが「0」以外
+
+有効	対象ベース	グループ	列	演算子	値1	値2
+○	pcm_t_コンプラ相談	10	作成日	>=	2023/04/01	
+○	pcm_t_コンプラ相談	10	削除フラグ	<>	0	
+
+（グループ=10 の2行は AND で結合）
+
+⸻
+
+4) 既存コードへの影響
+	•	既存の Mapping 読み込み・JOIN・加工ロジックはそのままです。
+	•	フィルタ適用は TableData の配列を「行抽出した配列」に差し替えるだけなので、以降の BuildKeyIndexes、BuildJoinedRaw などはそのまま動きます。
+	•	ルール表が無い/空でも安全にスキップします。
+
+⸻
+
+5) つまずきがちなポイント（チェックリスト）
+	•	フィルタ対象の列名は CSVヘッダ と一致させる（Mappingの“出力カラム名”ではありません）。
+	•	「日付」は IsDate 判定できる形（例：2023/04/01）に。
+	•	IN の値は A,B,C のようなカンマ区切り（空白は内部でTrimします）。
+	•	LIKE は VBA の Like を利用（例：2023-04-* など）。
+	•	シート上のテーブル名は Filter_RulesSimple（ListObjectの名前）になっているか。
+
+⸻
+
+必要なら、演算子の追加（正規表現 REGEX 等）や、型を明示する列（例：型=DATE/NUMBER/TEXT）を足すのも簡単に拡張できます。まずはこの最小セットで回して、要件に合わせて広げましょう！
