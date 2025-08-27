@@ -1,394 +1,247 @@
-了解です！
-いただいた“最新コード”に手を入れずに差し込める形で、**案2（行ベース AND/OR グループ）**のフィルター機能を追加します。
-以下をそのまま貼り付け・置き換えしてください。
+いいですね！そのまま社内規約として配れたり、リポジトリに置けるように「規約本文」「チェックリスト」「関数テンプレ」の3点セットで作りました。必要に応じて社名や責任者名を入れて使ってください。
 
 ⸻
 
-1) 新規モジュール：modFilterRules（まるごと新規追加）
+PowerShell コーディングルール（テンプレート）
 
-Attribute VB_Name = "modFilterRules"
-Option Explicit
+版: v0.1 / 適用範囲: PowerShell 7.x（Core）および Windows PowerShell 5.1（互換が必要な場合明記）
+対象: スクリプト（.ps1）、関数モジュール（.psm1）、バイナリ以外のモジュール、CI/CD 用スクリプト
 
-'========================================================
-' Filter_RulesSimple（テーブル名）を読み込んで
-' 各ベーステーブルごとのフィルタ規則に分配し、
-' TableData(<対象テーブル>) を行単位で絞り込みます。
-'
-' ルール表（ListObject名：Filter_RulesSimple）レイアウト想定：
-'   A:有効（○/1/TRUE）   B:対象ベース（CSVヘッダのテーブル名）
-'   C:グループ（整数）    D:列（CSVのヘッダ名）
-'   E:演算子（=, <>, >, >=, <, <=, BETWEEN, IN, LIKE, STARTSWITH, ENDSWITH, ISNULL, NOTNULL）
-'   F:値1                  G:値2（BETWEENの上限など）
-'
-' 評価ロジック：
-'   - 同じグループ番号の行は AND で結合
-'   - グループ間は OR で結合
-'   - つまり WHERE (group=10 条件 AND …) OR (group=20 条件 AND …) …
-'
-' 注意：
-'   - 列名（D列）は CSV のヘッダ文字列と一致させてください
-'   - 型指定列は持たない設計。判定時に IsDate/IsNumeric で緩やかに解釈
-'========================================================
+1. 目的
+	•	可読性・保守性・安全性・再利用性の向上
+	•	自動化された静的解析・テスト（PSScriptAnalyzer / Pester）との整合
 
-Private Type TFilterRule
-    Enabled As Boolean
-    TargetTable As String
-    GroupId As Long
-    ColName As String
-    Op As String
-    Val1 As String
-    Val2 As String
-End Type
+2. 命名規則
+	•	関数: 動詞-名詞（Approved Verbs 準拠例: Get, Set, New, Test, Invoke）
+例: Get-UserReport, Invoke-DataMigration
+	•	変数: camelCase（スコープ接頭辞は必要時のみ: $script:cache）
+	•	定数: UPPER_SNAKE_CASE（Set-StrictMode -Version Latest 下で readonly 推奨）
+	•	パラメータ: PascalCase（例: -InputPath, -WhatIf）
+	•	ファイル/モジュール: PascalCase（例: DataDiff.Tools.psm1）
+	•	エイリアス: 作成禁止。使用も原則禁止（Select-Object を select と書かない）。
 
-'=== 入口：フィルタ読込→適用（ImportFiles内から呼ぶ想定） ===
-Public Sub ApplyFiltersIfExist()
-    Dim lo As ListObject
-    Set lo = GetListObjectByName("Filter_RulesSimple")
-    If lo Is Nothing Then
-        WriteLog "INFO", "Filter_RulesSimple not found. Skip filtering."
-        Exit Sub
-    End If
+3. 書式・スタイル
+	•	インデント: スペース 4。タブ禁止
+	•	行長: 120 桁目安（超過はパイプ位置で改行）
+	•	波括弧: 開きは同一行、閉じは改行後
+	•	パイプライン: 行末パイプ、次行 4 スペースインデント
+	•	比較: 型に応じて -eq/-ne/-lt/...、ワイルドカードは -like、正規表現は -match
+	•	文字列: 変数展開が必要→二重引用符、不要→単引用符
+	•	ハッシュ/配列: 末尾カンマOK（差分見やすさ優先）
 
-    Dim rules As Collection
-    Set rules = ReadRulesFromListObject(lo)
-    If rules Is Nothing Or rules.Count = 0 Then
-        WriteLog "INFO", "Filter_RulesSimple is empty. Skip filtering."
-        Exit Sub
-    End If
+4. 関数設計
+	•	1 関数 1 責務。副作用を最小化。
+	•	CmdletBinding を付与し、SupportsShouldProcess を必要時に有効化（-WhatIf/-Confirm 対応）。
+	•	入力/出力: 文字列ではなくオブジェクトを入出力。Write-Output 明示。Write-Host 禁止。
+	•	パラメータ: Mandatory, Position, ValueFromPipeline, ValidateSet/ValidatePattern/ValidateRange, HelpMessage を適切に付与。
+	•	戻り値: 例外は例外で返し、エラー時に部分的成功のオブジェクトを返さない。
 
-    ' ベーステーブル毎に抽出
-    Dim byTable As Object
-    Set byTable = GroupRulesByTable(rules)
+5. コメントとヘルプ
+	•	すべての公開関数にコメントベースドヘルプを付与（SYNOPSIS, DESCRIPTION, PARAMETERS, EXAMPLES, INPUTS, OUTPUTS, NOTES, LINK）。
+	•	1～3 行の要約コメントを関数定義直前に置く。
+	•	TODO コメントは禁止。Issue/タスク管理に記録。
 
-    Dim t As Variant
-    For Each t In byTable.Keys
-        If TableData.Exists(CStr(t)) Then
-            Dim arr As Variant
-            arr = TableData(CStr(t))
-            Dim grouped As Object
-            Set grouped = byTable(CStr(t)) ' GroupId -> Collection(TFilterRule)
-            Dim filtered As Variant
-            filtered = FilterArrayByGroups(arr, grouped)
-            TableData(CStr(t)) = filtered
-            WriteLog "INFO", "Filtered table=" & CStr(t) & " rows=" & IIf(IsArray(filtered), UBound(filtered, 1) - 1, 0)
-        Else
-            WriteLog "WARN", "Filter target table not loaded: " & CStr(t)
-        End If
-    Next
-End Sub
+6. エラー処理
+	•	終端エラーを原則使用：$ErrorActionPreference = 'Stop' を関数冒頭でローカルに設定。
+	•	try { ... } catch [具体例外] { ... } finally { ... } を使用。
+	•	throw で意味のあるメッセージと ErrorRecord を。Write-Error は進行継続が妥当なときのみ。
+	•	コマンドレット呼び出しには -ErrorAction Stop と -ErrorVariable ev を併用可。
 
-'=== ルール読み込み ===
-Private Function ReadRulesFromListObject(lo As ListObject) As Collection
-    Dim col As New Collection
-    Dim r As Long, lastRow As Long
-    lastRow = lo.ListRows.Count
-    If lastRow = 0 Then Set ReadRulesFromListObject = col: Exit Function
+7. ロギング
+	•	進捗/情報: Write-Verbose / Write-Information
+	•	警告: Write-Warning
+	•	エラー: 例外（throw）を第一選択
+	•	ログレベルは -Verbose, $InformationPreference で制御可能に。
 
-    Dim body As Range: Set body = lo.DataBodyRange
+8. セキュリティ
+	•	資格情報の平文禁止。[PSCredential]、SecretManagement、環境変数を利用。
+	•	パス結合: Join-Path、ハードコード禁止。
+	•	入力検証: Validate* 属性必須、危険な既定値は設定しない。
+	•	コード署名: 配布用スクリプト/モジュールは署名。実行ポリシーに依存しない運用を検討。
+	•	外部コマンド: Start-Process -NoNewWindow -Wait などで引数を明示的に。
 
-    For r = 1 To lastRow
-        Dim rule As TFilterRule, ok As Boolean
-        ok = IsEnabled(body.Cells(r, 1).Value)
-        If ok Then
-            rule.Enabled = True
-            rule.TargetTable = Trim$(CStr(body.Cells(r, 2).Value))
-            rule.GroupId = CLng(Val(body.Cells(r, 3).Value))
-            rule.ColName = Trim$(CStr(body.Cells(r, 4).Value))
-            rule.Op = UCase$(Trim$(CStr(body.Cells(r, 5).Value)))
-            rule.Val1 = CStr(body.Cells(r, 6).Value)
-            rule.Val2 = CStr(body.Cells(r, 7).Value)
-            If Len(rule.TargetTable) > 0 And Len(rule.ColName) > 0 And Len(rule.Op) > 0 Then
-                col.Add rule
-            End If
-        End If
-    Next
-    Set ReadRulesFromListObject = col
-End Function
+9. パフォーマンス
+	•	パイプの大量アイテム処理は ForEach-Object -Parallel（要 PS7）や foreach を使い分け。
+	•	不要なサブエクスプリッション $() と文字列補間を避ける。
+	•	Measure-Command や軽微なベンチを PR で提示。
 
-Private Function IsEnabled(v As Variant) As Boolean
-    Dim s As String: s = UCase$(Trim$(CStr(v)))
-    IsEnabled = (s = "○" Or s = "1" Or s = "TRUE" Or s = "YES" Or s = "有効")
-End Function
+10. テスト・静的解析・CI
+	•	Pester: すべての公開関数にユニットテスト。Arrange/Act/Assert 構成。
+	•	PSScriptAnalyzer: Invoke-ScriptAnalyzer を CI で必須。Settings.PSSA.psd1 にルールセット。
+	•	コードカバレッジ 目標値（例: 80%）。閾値未満は PR をブロック。
 
-'=== テーブル名→(GroupId→ルール群) に分配 ===
-Private Function GroupRulesByTable(rules As Collection) As Object
-    Dim tblMap As Object: Set tblMap = CreateObject("Scripting.Dictionary")
-    Dim i As Long
-    For i = 1 To rules.Count
-        Dim kTbl As String: kTbl = rules(i).TargetTable
-        If Not tblMap.Exists(kTbl) Then
-            tblMap.Add kTbl, CreateObject("Scripting.Dictionary") ' groupId -> Collection(rule)
-        End If
-        Dim g As Object: Set g = tblMap(kTbl)
-        Dim gid As Long: gid = rules(i).GroupId
-        If Not g.Exists(gid) Then
-            g.Add gid, New Collection
-        End If
-        g(gid).Add rules(i)
-    Next
-    Set GroupRulesByTable = tblMap
-End Function
+11. 互換性
+	•	PowerShell 7 を基準。Windows PowerShell 5.1 が必要な場合は関数単位で #requires -Version 5.1 を明記、条件分岐で代替 API を使用。
 
-'=== OR(グループ) / AND(各グループ内) で配列を絞る ===
-Private Function FilterArrayByGroups(arr As Variant, grouped As Object) As Variant
-    On Error GoTo EH
-    If Not IsArray(arr) Then FilterArrayByGroups = arr: Exit Function
-    Dim rUB1 As Long, rUB2 As Long
-    rUB1 = UBound(arr, 1): rUB2 = UBound(arr, 2)
-    If rUB1 < 2 Then FilterArrayByGroups = arr: Exit Function ' ヘッダのみ
+12. バージョニング/配布
+	•	モジュールは SemVer（Major.Minor.Patch）。
+	•	module manifest（.psd1）に CompatiblePSEditions, PowerShellVersion, FunctionsToExport を明示。
+	•	変更履歴は CHANGELOG.md（Keep a Changelog 準拠）。
 
-    ' 列名から列番号へ（毎回Findするのは重いので、先に辞書化）
-    Dim colIdx As Object: Set colIdx = CreateObject("Scripting.Dictionary")
-    Dim c As Long
-    For c = 1 To rUB2
-        colIdx(AddNorm(arr(1, c))) = c
-    Next
+13. フォルダ構成（例）
 
-    ' 行を評価
-    Dim keep() As Boolean
-    ReDim keep(2 To rUB1)
-    Dim r As Long
-    For r = 2 To rUB1
-        keep(r) = RowMatchesGroups(arr, r, colIdx, grouped)
-    Next
-
-    ' 抽出結果を作成（ヘッダ＋一致行）
-    Dim outRows As Long: outRows = 1 ' ヘッダ
-    For r = 2 To rUB1
-        If keep(r) Then outRows = outRows + 1
-    Next
-    If outRows = 1 Then
-        ' 1行も一致しなければヘッダのみ返す
-        Dim outEmpty() As Variant
-        ReDim outEmpty(1 To 1, 1 To rUB2)
-        For c = 1 To rUB2: outEmpty(1, c) = arr(1, c): Next
-        FilterArrayByGroups = outEmpty
-        Exit Function
-    End If
-
-    Dim outArr() As Variant
-    ReDim outArr(1 To outRows, 1 To rUB2)
-    ' ヘッダ
-    For c = 1 To rUB2: outArr(1, c) = arr(1, c): Next
-    ' データ
-    Dim w As Long: w = 1
-    For r = 2 To rUB1
-        If keep(r) Then
-            w = w + 1
-            For c = 1 To rUB2
-                outArr(w, c) = arr(r, c)
-            Next
-        End If
-    Next
-    FilterArrayByGroups = outArr
-    Exit Function
-EH:
-    ' 失敗したら元を返す
-    FilterArrayByGroups = arr
-End Function
-
-Private Function RowMatchesGroups(arr As Variant, r As Long, colIdx As Object, grouped As Object) As Boolean
-    ' OR across groups
-    Dim g As Variant
-    For Each g In grouped.Keys
-        If RowMatchesOneGroup(arr, r, colIdx, grouped(g)) Then
-            RowMatchesGroups = True
-            Exit Function
-        End If
-    Next
-    RowMatchesGroups = False
-End Function
-
-Private Function RowMatchesOneGroup(arr As Variant, r As Long, colIdx As Object, rules As Collection) As Boolean
-    ' AND inside a group
-    Dim i As Long
-    For i = 1 To rules.Count
-        If Not RowMatchesOneRule(arr, r, colIdx, rules(i)) Then
-            RowMatchesOneGroup = False
-            Exit Function
-        End If
-    Next
-    RowMatchesOneGroup = True
-End Function
-
-Private Function RowMatchesOneRule(arr As Variant, r As Long, colIdx As Object, rule As TFilterRule) As Boolean
-    Dim cKey As String: cKey = AddNorm(rule.ColName)
-    If Not colIdx.Exists(cKey) Then
-        ' 列が見つからなければ不一致扱い
-        RowMatchesOneRule = False
-        Exit Function
-    End If
-    Dim ci As Long: ci = colIdx(cKey)
-    Dim v As Variant: v = arr(r, ci)
-    Dim op As String: op = rule.Op
-
-    Select Case op
-        Case "ISNULL"
-            RowMatchesOneRule = (Trim$(CStr(v)) = "")
-        Case "NOTNULL"
-            RowMatchesOneRule = (Trim$(CStr(v)) <> "")
-        Case "IN"
-            RowMatchesOneRule = ValueInList(v, rule.Val1) ' Val1 を「,」区切りの集合として扱う
-
-        Case "LIKE"
-            RowMatchesOneRule = LikeMatch(CStr(v), CStr(rule.Val1)) ' ワイルドカード *? を許容
-
-        Case "STARTSWITH"
-            RowMatchesOneRule = (Left$(CStr(v), Len(CStr(rule.Val1))) = CStr(rule.Val1))
-        Case "ENDSWITH"
-            RowMatchesOneRule = (Right$(CStr(v), Len(CStr(rule.Val1))) = CStr(rule.Val1))
-
-        Case "BETWEEN"
-            RowMatchesOneRule = CompareBetween(v, rule.Val1, rule.Val2)
-
-        Case "=", "<>", ">", ">=", "<", "<="
-            RowMatchesOneRule = CompareScalar(v, op, rule.Val1)
-
-        Case Else
-            ' 未知演算子は不一致扱い
-            RowMatchesOneRule = False
-    End Select
-End Function
-
-'=== 文字列正規化（BOM除去＋Trim） ===
-Private Function AddNorm(ByVal s As String) As String
-    If Len(s) = 0 Then AddNorm = "": Exit Function
-    s = Replace$(s, ChrW(&HFEFF), "")
-    s = Trim$(s)
-    AddNorm = s
-End Function
-
-'=== 比較：IN（Val1 をカンマ区切り） ===
-Private Function ValueInList(v As Variant, listCsv As String) As Boolean
-    Dim parts() As String, i As Long, meS As String
-    meS = CStr(v)
-    parts = Split(listCsv, ",")
-    For i = LBound(parts) To UBound(parts)
-        If meS = Trim$(parts(i)) Then
-            ValueInList = True: Exit Function
-        End If
-    Next
-    ValueInList = False
-End Function
-
-'=== 比較：LIKE（* と ? に対応。正規表現ではなく VBA Like） ===
-Private Function LikeMatch(ByVal s As String, ByVal pat As String) As Boolean
-    LikeMatch = (CStr(s) Like CStr(pat))
-End Function
-
-'=== 比較：スカラー（=, <>, >, >=, <, <=） ===
-Private Function CompareScalar(v As Variant, op As String, rhs As String) As Boolean
-    Dim a As Variant, b As Variant
-    a = v: b = rhs
-
-    ' 型の緩い推定：日付 > 数値 > 文字列
-    If IsDate(a) And IsDate(b) Then
-        CompareScalar = CompareByOp(CDbl(CDate(a)), op, CDbl(CDate(b)))
-    ElseIf IsNumeric(a) And IsNumeric(b) Then
-        CompareScalar = CompareByOp(CDbl(a), op, CDbl(b))
-    Else
-        CompareScalar = CompareByOp(CStr(a), op, CStr(b))
-    End If
-End Function
-
-Private Function CompareBetween(v As Variant, low As String, high As String) As Boolean
-    Dim a As Variant, lo As Variant, hi As Variant
-    a = v: lo = low: hi = high
-    If IsDate(a) And IsDate(lo) And IsDate(hi) Then
-        CompareBetween = (CDbl(CDate(a)) >= CDbl(CDate(lo)) And CDbl(CDate(a)) <= CDbl(CDate(hi)))
-    ElseIf IsNumeric(a) And IsNumeric(lo) And IsNumeric(hi) Then
-        Dim x As Double: x = CDbl(a)
-        CompareBetween = (x >= CDbl(lo) And x <= CDbl(hi))
-    Else
-        Dim s As String: s = CStr(a)
-        CompareBetween = (s >= CStr(lo) And s <= CStr(hi))
-    End If
-End Function
-
-Private Function CompareByOp(a As Variant, op As String, b As Variant) As Boolean
-    Select Case op
-        Case "=":   CompareByOp = (a = b)
-        Case "<>":  CompareByOp = (a <> b)
-        Case ">":   CompareByOp = (a > b)
-        Case ">=":  CompareByOp = (a >= b)
-        Case "<":   CompareByOp = (a < b)
-        Case "<=":  CompareByOp = (a <= b)
-        Case Else:  CompareByOp = False
-    End Select
-End Function
+repo-root/
+├─ src/
+│  ├─ ModuleName/
+│  │  ├─ ModuleName.psd1
+│  │  ├─ ModuleName.psm1
+│  │  └─ Public/ Private/ (関数 .ps1 分割)
+├─ tests/ (Pester)
+├─ tools/  (PSScriptAnalyzer 設定など)
+├─ examples/
+├─ .editorconfig
+├─ Settings.PSSA.psd1
+└─ README.md / CONTRIBUTING.md / CHANGELOG.md
 
 
 ⸻
 
-2) 既存 modProcess.ImportFiles の変更点
-
-「CSV読込 → キー索引の構築」の前に、上のフィルターを適用してください。
-以下の該当位置に2行を追加（コメントごとコピペOK）。
-
-' ...LoadAllCsv 成功後
-WriteLog "INFO", "LoadAllCsv succeeded"
-
-' ▼▼ ここでフィルター適用（存在すれば発動） ▼▼
-ApplyFiltersIfExist
-WriteLog "INFO", "ApplyFiltersIfExist done"
-
-' キー辞書（Single & Multi）
-BuildKeyIndexes
-
-これで、Filter_RulesSimple がある場合のみ自動でフィルタが効き、
-無い場合/空の場合は何もせず従来どおり進みます。
+付録A：PR前セルフチェックリスト（貼って使う）
+	•	Approved Verb を使った 動詞-名詞 形式の関数名になっている
+	•	すべての公開関数にコメントベースドヘルプがある（使用例含む）
+	•	CmdletBinding() と適切な Parameter() 属性を付与
+	•	SupportsShouldProcess 実装済み（破壊的操作のみ）
+	•	$ErrorActionPreference = 'Stop' と try/catch を実装
+	•	出力はオブジェクトで、Write-Host 不使用
+	•	入力検証（ValidateSet/ValidatePattern/ValidateRange）を実装
+	•	ログは Write-Verbose/Information/Warning を使用
+	•	PSScriptAnalyzer エラー/警告 0
+	•	Pester テストに合格、カバレッジ >= 80%
+	•	機微情報のハードコードなし、パスは Join-Path
+	•	行長 <= 120、スペース 4 インデント
+	•	例外/エラー メッセージが具体的で再現手順を示す
 
 ⸻
 
-3) ルール表のレイアウト（最小）
+付録B：関数テンプレ（コピペ用）
 
-シートにテーブル（ListObject）名 Filter_RulesSimple を作成して、ヘッダを次の7列にしてください。
+function Get-ExampleItem {
+<#
+.SYNOPSIS
+  〇〇を取得します。
 
-A:有効	B:対象ベース	C:グループ	D:列	E:演算子	F:値1	G:値2
+.DESCRIPTION
+  指定条件に一致するアイテムを取得してオブジェクトで返します。
 
+.PARAMETER Name
+  アイテム名。ValidateSet で事前定義可能です。
 
-	•	有効: ○ / 1 / TRUE など（空は無視）
-	•	対象ベース: 絞り込みたい CSV のテーブル名（拡張子なし）
-例: pcm_t_コンプラ相談
-	•	グループ: 同じ番号は AND、番号が異なるグループ同士は OR
-	•	列: CSV のヘッダ名を正確に（BOM/空白は内部で吸収）
-	•	演算子:
-	•	=, <>, >, >=, <, <=
-	•	BETWEEN（値1=下限, 値2=上限）
-	•	IN（値1に「カンマ区切り」）
-	•	LIKE（ワイルドカード * と ? ）
-	•	STARTSWITH, ENDSWITH
-	•	ISNULL, NOTNULL
-	•	値1 / 値2: 必要に応じて設定（不要なら空でOK）
+.PARAMETER Path
+  参照するルートパス。既定はカレント。
+
+.EXAMPLE
+  PS> Get-ExampleItem -Name Foo -Path C:\Data
+
+.INPUTS
+  System.String
+
+.OUTPUTS
+  Example.Item
+
+.NOTES
+  Owner: ＜責任者名／チーム＞ / Since: 2025-08-28
+.LINK
+  https://＜社内Wiki等＞
+#>
+    [CmdletBinding(SupportsShouldProcess = $false, ConfirmImpact='Low')]
+    param(
+        [Parameter(Mandatory, Position=0)]
+        [ValidateNotNullOrEmpty()]
+        [string]$Name,
+
+        [Parameter(Mandatory=$false)]
+        [ValidateScript({ Test-Path $_ })]
+        [string]$Path = (Get-Location).Path
+    )
+
+    begin {
+        $ErrorActionPreference = 'Stop'
+    }
+    process {
+        try {
+            # メインロジック
+            $item = [pscustomobject]@{
+                Name = $Name
+                Path = (Resolve-Path $Path).Path
+                Timestamp = [datetime]::UtcNow
+            }
+            Write-Output $item
+        }
+        catch [System.IO.IOException] {
+            throw
+        }
+        catch {
+            $msg = "Get-ExampleItem で予期せぬエラー: {0}" -f $_.Exception.Message
+            throw (New-Object System.Exception($msg, $_.Exception))
+        }
+    }
+}
+
 
 ⸻
 
-例：ご要望の SQL 風条件
+付録C：スクリプトヘッダ（.ps1 用）
 
-作成日が「2023年4月以降」かつ削除フラグが「0」以外
+#requires -Version 7.2
+<# 
+.SYNOPSIS
+  ＜スクリプト概要＞
+.DESCRIPTION
+  ＜もう少し詳しい説明＞
+.PARAMETER InputPath
+  ＜説明＞
+.EXAMPLE
+  PS> .\Do-Thing.ps1 -InputPath ./data
+.NOTES
+  Author: ＜名前＞
+  Version: 1.0.0
+  Updated: 2025-08-28
+#>
 
-有効	対象ベース	グループ	列	演算子	値1	値2
-○	pcm_t_コンプラ相談	10	作成日	>=	2023/04/01	
-○	pcm_t_コンプラ相談	10	削除フラグ	<>	0	
+param(
+  [Parameter(Mandatory)]
+  [ValidateScript({ Test-Path $_ })]
+  [string]$InputPath
+)
 
-（グループ=10 の2行は AND で結合）
+Set-StrictMode -Version Latest
+$PSStyle.OutputRendering = 'Ansi'  # Windows Terminal などで装飾を有効に
+
+$ErrorActionPreference = 'Stop'
+try {
+  # 実処理
+}
+catch {
+  Write-Error -Message ("Do-Thing.ps1 failed: {0}" -f $_.Exception.Message)
+  exit 1
+}
+
 
 ⸻
 
-4) 既存コードへの影響
-	•	既存の Mapping 読み込み・JOIN・加工ロジックはそのままです。
-	•	フィルタ適用は TableData の配列を「行抽出した配列」に差し替えるだけなので、以降の BuildKeyIndexes、BuildJoinedRaw などはそのまま動きます。
-	•	ルール表が無い/空でも安全にスキップします。
+付録D：PSScriptAnalyzer 設定（雛形 Settings.PSSA.psd1）
+
+@{
+    ExcludeRules = @(
+        'PSUseShouldProcessForStateChangingFunctions' # 必要に応じて
+    )
+    IncludeRules = @(
+        'PSAvoidUsingWriteHost',
+        'PSUseApprovedVerbs',
+        'PSAvoidGlobalVars',
+        'PSUseConsistentIndentation',
+        'PSPossibleIncorrectComparisonWithNull',
+        'PSAlignAssignmentStatement',
+        'PSUseConsistentWhitespace'
+    )
+    Rules = @{
+        PSUseConsistentIndentation = @{ Enable = $true; IndentationSize = 4; Kind = 'space' }
+        PSUseConsistentWhitespace = @{ Enable = $true }
+    }
+}
+
 
 ⸻
 
-5) つまずきがちなポイント（チェックリスト）
-	•	フィルタ対象の列名は CSVヘッダ と一致させる（Mappingの“出力カラム名”ではありません）。
-	•	「日付」は IsDate 判定できる形（例：2023/04/01）に。
-	•	IN の値は A,B,C のようなカンマ区切り（空白は内部でTrimします）。
-	•	LIKE は VBA の Like を利用（例：2023-04-* など）。
-	•	シート上のテーブル名は Filter_RulesSimple（ListObjectの名前）になっているか。
-
-⸻
-
-必要なら、演算子の追加（正規表現 REGEX 等）や、型を明示する列（例：型=DATE/NUMBER/TEXT）を足すのも簡単に拡張できます。まずはこの最小セットで回して、要件に合わせて広げましょう！
+必要なら、このテンプレを社内Wiki（Markdown）とリポジトリ雛形（src/, tests/, tools/）に展開する初期コミット用のファイル一式も作れます。
+「Windows PowerShell 5.1 必須」「Azure DevOps Pipelines で実行」などの運用前提があれば、それに合わせて微調整した版もすぐ出します。
