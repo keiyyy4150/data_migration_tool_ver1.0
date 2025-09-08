@@ -1,86 +1,231 @@
-原因は、ClearData で DataBodyRange.Delete を実行してテーブル本体の行を削除しているためです。行を削除すると「ヘッダーのみ（= 実質 1 行相当）」の状態になって見えてしまいます。
+原因は大きく2つ考えられます。まずは“書き方”を直し、その上で「フィルタを実際に適用するコード」が入っているか確認してください。
 
-対処（差し替えコード）
+⸻
 
-テーブル本体は削除せず、「既定行数」にリサイズして中身だけ空にするようにします。すでに用意済みの ResetMasterSize を使えばOKです。ClearData の該当箇所を以下に置き換えてください。
+1) 書き方（表の値）
 
-'==============================
-' Clear：Masterクリア＆中間データ破棄（安全版）
-'==============================
-Public Sub ClearData()
-    Dim prevCalc As XlCalculation
-    Dim prevUpd As Boolean, prevEvt As Boolean, prevDisp As Boolean
-    Dim t0 As Double: t0 = Timer
+今の1行はこうですよね：
 
-    If Len(CurrentMasterTableName) = 0 Then UsePipelineMain
+有効, 対象テーブル,     グループ, 対象カラム, 演算子, 値
+"○",  pcm_t_コンプラ相談, 1,      削除フラグ,  "=",   0
 
-    ' 高速化設定の退避
-    On Error Resume Next
-    prevUpd = Application.ScreenUpdating
-    prevEvt = Application.EnableEvents
-    prevDisp = Application.DisplayAlerts
-    prevCalc = Application.Calculation
-    Application.ScreenUpdating = False
-    Application.EnableEvents = False
-    Application.DisplayAlerts = False
-    Application.Calculation = xlCalculationManual
-    On Error GoTo 0
+	•	ダブルクォートは入れないでください。
+→ 実セルは ○ / = と素で入れてOKです（"○" や "=" と入力すると、VBA側の比較で一致しません）。
+	•	値は 0（半角）でOK。
+	•	「対象テーブル」「対象カラム」は CSVのヘッダ名と完全一致（前後空白・全角空白なし）にしてください。
 
-    On Error GoTo EH
-    Dim lo As ListObject
-    Set lo = GetListObjectByName(CurrentMasterTableName)
-    If Not lo Is Nothing Then
-        ' フィルタ解除
-        On Error Resume Next
-        If Not lo.AutoFilter Is Nothing Then lo.AutoFilter.ShowAllData
-        On Error GoTo 0
+修正例（セルの中身）：
 
-        ' ←ここがポイント：行を「削除」せず、既定サイズに「リサイズ」して中身だけ空にする
-        ResetMasterSize lo   ' B4 の値（空なら 20000 行）に合わせてリサイズ＆ClearContents
+○ | pcm_t_コンプラ相談 | 1 | 削除フラグ | = | 0
+
+
+⸻
+
+2) フィルタがコードに“適用されていない”可能性
+
+表の書き方が正しくても、Import 時にフィルタを実行するフックが入っていないと全件通過します。
+
+あなたが共有してくれた現行コード（modJoinAndEval の BuildJoinedRaw）には、
+「この行をフィルタで落とすか？」の判定がまだ入っていませんでした。
+
+追加する最小パッチ
+
+A. modFilterRules に簡易評価関数を用意
+
+（既にある場合はスキップ。なければこのミニ実装でOK）
+
+'=== modFilterRules（簡易版） =========================================
+Option Explicit
+
+' ルール表（ListObject名）— 必要なら名前を合わせてください
+Private Const FILTER_TABLE_NAME As String = "Filter_Rules"
+
+' 1回だけ読み込む
+Private mRulesLoaded As Boolean
+Private mRules As Collection  ' 各要素: Dictionary("Table","Column","Op","Value","Group","Enabled")
+
+' 文字列整形（Trim + 両端のクォート除去）
+Private Function Clean(ByVal s As String) As String
+    s = Trim$(s)
+    If (Left$(s, 1) = """" And Right$(s, 1) = """") Or (Left$(s, 1) = "'" And Right$(s, 1) = "'") Then
+        s = Mid$(s, 2, Len(s) - 2)
     End If
+    Clean = s
+End Function
 
-    ' 中間データの解放
-    HasRaw = False
-    IsProcessed = False
+' ヘッダ正規化（BOM除去＋Trim）
+Private Function NormHead(ByVal s As String) As String
+    If Len(s) = 0 Then NormHead = "": Exit Function
+    s = Replace$(s, ChrW(&HFEFF), "")
+    NormHead = Trim$(s)
+End Function
 
-    On Error Resume Next
-    If (Not Not RawJoined) <> 0 Then Erase RawJoined
-    If (Not Not m_baseRowIdx) <> 0 Then Erase m_baseRowIdx
-    On Error GoTo 0
+' ルール一括読み込み（有効=○のみ）
+Private Sub EnsureRulesLoaded()
+    If mRulesLoaded Then Exit Sub
+    Set mRules = New Collection
 
-    m_baseTblName = ""
-    Set TableData = Nothing
-    Set KeyIndexSingle = Nothing
-    Set KeyIndexMulti = Nothing
-
-    WriteLog "INFO", "ClearData: cleared in " & Format(Timer - t0, "0.00") & "s"
-DONE:
-    ' 設定を戻す
-    On Error Resume Next
-    Application.ScreenUpdating = prevUpd
-    Application.EnableEvents = prevEvt
-    Application.DisplayAlerts = prevDisp
-    Application.Calculation = prevCalc
-    On Error GoTo 0
-
-    MsgBox "初期化しました。", vbInformation
-    Exit Sub
-
-EH:
-    On Error Resume Next
-    Application.ScreenUpdating = prevUpd
-    Application.EnableEvents = prevEvt
-    Application.DisplayAlerts = prevDisp
-    Application.Calculation = prevCalc
-    On Error GoTo 0
-    WriteLog "ERROR", "ClearData error: " & Err.Number & " " & Err.Description
-    MsgBox "ClearDataでエラー: " & Err.Description, vbCritical
+    Dim lo As ListObject
+    Set lo = GetListObjectByName(FILTER_TABLE_NAME)
+    If Not lo Is Nothing Then
+        Dim r As Long, rw As Range
+        For r = 1 To lo.ListRows.Count
+            Set rw = lo.DataBodyRange.Rows(r)
+            Dim en As String:   en = Clean(CStr(rw.Cells(1, 1).Value))          ' 有効
+            If en = "○" Or UCase$(en) = "TRUE" Then
+                Dim one As Object: Set one = CreateObject("Scripting.Dictionary")
+                one("Table")  = Clean(CStr(rw.Cells(1, 2).Value))               ' 対象テーブル
+                one("Group")  = CLng(Val(rw.Cells(1, 3).Value))                 ' グループ
+                one("Column") = NormHead(CStr(rw.Cells(1, 4).Value))            ' 対象カラム
+                one("Op")     = Clean(CStr(rw.Cells(1, 5).Value))               ' 演算子
+                one("Value")  = Clean(CStr(rw.Cells(1, 6).Value))               ' 値
+                mRules.Add one
+            End If
+        Next
+    End If
+    mRulesLoaded = True
 End Sub
 
-補足
-	•	ResetMasterSize は
-	•	シートの B4 に書いた既定行数（空なら 20,000）へテーブルをリサイズ
-	•	そのうえで DataBodyRange.ClearContents を実行
-します。
-	•	これで「クリア後にテーブル範囲が 1 行だけになる」現象は解消します。
-	•	見た目の既定行数を変えたいときは、Master シートの B4 に希望行数を書いてください。
+' 比較（=, <>, >, >=, <, <= のみ）
+Private Function CompareOp(ByVal actual As String, ByVal op As String, ByVal expected As String) As Boolean
+    op = Trim$(op)
+    Select Case op
+        Case "="
+            CompareOp = (actual = expected)
+        Case "<>"
+            CompareOp = (actual <> expected)
+        Case ">", ">=", "<", "<="
+            ' 数値として比較（変換失敗は0扱い）
+            Dim a#, e#
+            On Error Resume Next
+            a = CDbl(actual): e = CDbl(expected)
+            On Error GoTo 0
+            Select Case op
+                Case ">":  CompareOp = (a > e)
+                Case ">=": CompareOp = (a >= e)
+                Case "<":  CompareOp = (a < e)
+                Case "<=": CompareOp = (a <= e)
+            End Select
+        Case Else
+            CompareOp = False  ' 未対応演算子は不一致
+    End Select
+End Function
+
+' 1行がグループ条件を満たすか（同一グループは AND、グループ間は OR）
+Public Function PassesFilterBaseRow(ByVal baseTbl As String, ByRef baseArr As Variant, ByVal rowIdx As Long) As Boolean
+    EnsureRulesLoaded
+
+    ' このテーブル向けのルールが1つも無ければ「全件通過」
+    Dim hasAny As Boolean: hasAny = False
+    Dim g As Object: Set g = CreateObject("Scripting.Dictionary") ' group -> Collection of rules
+
+    Dim i As Long
+    For i = 1 To mRules.Count
+        If mRules(i)("Table") = baseTbl Then
+            hasAny = True
+            Dim gid As Long: gid = mRules(i)("Group")
+            If Not g.Exists(gid) Then g.Add gid, New Collection
+            g(gid).Add mRules(i)
+        End If
+    Next
+    If Not hasAny Then PassesFilterBaseRow = True: Exit Function
+
+    ' OR（どれかのグループを満たせば採用）
+    Dim k As Variant
+    For Each k In g.Keys
+        Dim okGroup As Boolean: okGroup = True
+
+        Dim colls As Collection: Set colls = g(k)
+        Dim j As Long
+        For j = 1 To colls.Count
+            Dim rule As Object: Set rule = colls(j)
+            ' 対象カラムの列番号を取得
+            Dim ci As Long
+            ci = FindColumnIndex(baseArr, rule("Column"))
+            If ci = 0 Then
+                okGroup = False: Exit For ' カラム見つからない→グループNG
+            End If
+            Dim actual As String: actual = CStr(baseArr(rowIdx, ci))
+            If Not CompareOp(actual, rule("Op"), rule("Value")) Then
+                okGroup = False: Exit For
+            End If
+        Next
+
+        If okGroup Then PassesFilterBaseRow = True: Exit Function
+    Next
+
+    PassesFilterBaseRow = False
+End Function
+'====================================================================
+
+B. modJoinAndEval の BuildJoinedRaw に「行スキップ」を追加
+
+（★ 追加行だけ示します）
+
+' 実データ埋め（常に無加工：モードは無視）
+Dim outRow As Long: outRow = 0
+For r = 2 To UBound(baseArr, 1)
+
+    ' ★ここを追加：フィルタ不一致ならスキップ
+    If Not PassesFilterBaseRow(baseTbl, baseArr, r) Then
+        GoTo CONTINUE_R
+    End If
+    ' ★ここまで
+
+    myKey = BuildKeyFromRow(baseArr, r, baseKeyCols)
+    expand = 1
+    If AllowOneToMany Then
+        expand = MaxMatchesForKey(myKey, baseTbl)
+        If expand < 1 Then expand = 1
+    End If
+    For k = 1 To expand
+        outRow = outRow + 1
+        m_baseRowIdx(outRow) = r
+        For c = 1 To outColsCnt
+            result(outRow, c) = BuildValueModeRaw(c, baseTbl, r, myKey, k)
+        Next c
+    Next k
+CONTINUE_R:
+Next r
+
+これで、Import の時点で base テーブルに対してフィルタを効かせ、削除フラグ≠0の行は丸ごと落ちます。
+
+⸻
+
+3) それでも通ってしまう時のチェックリスト
+	•	フィルタ表の ListObject名 がコードの FILTER_TABLE_NAME と一致しているか（例：Filter_Rules）。
+	•	「対象テーブル」の表記が Mapping の H列以降のヘッダ（CSV名）と完全一致か。
+	•	余計な空白や全角スペース、全角＝などが紛れていないか。
+	•	先に示した BuildJoinedRaw のスキップ処理が入っているか。
+
+⸻
+
+おまけ：IF の THEN/ELSE に {トークン} を使う件
+
+「IF({pcm_t_コンプラ相談.SEQ}="","","Q{pcm_t_コンプラ相談.SEQ}") がそのまま文字列表示」になる件は、
+IF の then/else 文字列中の {...} を展開する処理が足りていないためです。
+以下のように EvalIFLine の返す前で ApplyTemplate を通すと解決します（既に導入済みなら不要）。
+
+' EvalIFLine の末尾あたり
+Dim chosen As String
+If ok Then
+    chosen = thenText
+Else
+    chosen = elseText
+End If
+
+If InStr(chosen, "{") > 0 Then
+    EvalIFLine = ApplyTemplate(chosen, baseTbl, baseRow, myKey, processed, outColIndex)
+Else
+    EvalIFLine = chosen
+End If
+
+
+⸻
+
+これで、
+	•	フィルタの書き方：○ / = / 0（クォートなし）
+	•	Import 時にルール適用：上の2つの差分を入れる
+	•	IF の then/else 内のトークン展開：上の小修正
+
+を押さえれば、削除フラグ=1の行は Master に出てこなくなるはずです。必要なら、あなたの環境の Filter_Rules の列順・名称に合わせて常識的に読み替えてください。
